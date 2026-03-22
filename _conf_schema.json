@@ -6,7 +6,7 @@
   },
   "astrbot_data_dir": {
     "type": "string",
-    "description": "AstrBot data 目录绝对路径。留空时自动推断。",
+    "description": "[已弃用] data 目录由 AstrBot 官方接口提供，此配置项将被忽略。",
     "default": ""
   },
   "storage_path": {

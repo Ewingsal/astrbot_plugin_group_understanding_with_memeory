@@ -80,6 +80,10 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _upsert(store: GroupOriginStore, **kwargs) -> None:
+    _run(store.upsert_group_origin(**kwargs))
+
+
 def _new_service(
     tmp_path: Path,
     *,
@@ -154,8 +158,8 @@ def test_scheduler_sends_per_group_without_cross_mix(tmp_path: Path) -> None:
     )
     _configure_service(service, enable=False)
 
-    store.upsert_group_origin(group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
-    store.upsert_group_origin(group_id="group_b", unified_msg_origin="umo_b", last_active_at=222)
+    _upsert(store, group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
+    _upsert(store, group_id="group_b", unified_msg_origin="umo_b", last_active_at=222)
 
     result = _run(service.run_once_for_time(datetime(2026, 3, 22, 18, 0, 0)))
 
@@ -179,8 +183,8 @@ def test_scheduler_whitelist_only_sends_allowed_groups(tmp_path: Path) -> None:
     )
     _configure_service(service, enable=False, whitelist_enabled=True, whitelist=["group_a"])
 
-    store.upsert_group_origin(group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
-    store.upsert_group_origin(group_id="group_b", unified_msg_origin="umo_b", last_active_at=222)
+    _upsert(store, group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
+    _upsert(store, group_id="group_b", unified_msg_origin="umo_b", last_active_at=222)
 
     result = _run(service.run_once_for_time(datetime(2026, 3, 22, 18, 0, 0)))
 
@@ -198,7 +202,7 @@ def test_scheduler_trigger_calls_send_logic(tmp_path: Path) -> None:
     )
     _configure_service(service, enable=False)
 
-    store.upsert_group_origin(group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
+    _upsert(store, group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
 
     _run(service.run_once_for_time(datetime(2026, 3, 22, 18, 0, 0)))
 
@@ -208,7 +212,7 @@ def test_scheduler_trigger_calls_send_logic(tmp_path: Path) -> None:
 def test_private_chat_origin_not_stored_when_group_id_missing(tmp_path: Path) -> None:
     store = GroupOriginStore(tmp_path / "group_origins.json")
 
-    store.upsert_group_origin(group_id="", unified_msg_origin="private:umo", last_active_at=123)
+    _upsert(store, group_id="", unified_msg_origin="private:umo", last_active_at=123)
 
     assert store.list_group_records() == []
 
@@ -220,7 +224,7 @@ def test_scheduler_background_loop_runs_and_invokes_send(tmp_path: Path) -> None
         reports_by_group={"group_a": _report("group_a", "A 群主动发言")},
         sent=sent,
     )
-    store.upsert_group_origin(group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
+    _upsert(store, group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
 
     async def _case():
         service.start(
@@ -264,8 +268,8 @@ def test_scheduler_processes_groups_in_parallel(tmp_path: Path) -> None:
     )
     _configure_service(service, enable=False)
 
-    store.upsert_group_origin(group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
-    store.upsert_group_origin(group_id="group_b", unified_msg_origin="umo_b", last_active_at=222)
+    _upsert(store, group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
+    _upsert(store, group_id="group_b", unified_msg_origin="umo_b", last_active_at=222)
 
     started = perf_counter()
     _run(service.run_once_for_time(datetime(2026, 3, 22, 18, 0, 0)))

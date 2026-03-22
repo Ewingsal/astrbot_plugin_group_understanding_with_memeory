@@ -8,12 +8,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
 
-try:
-    from astrbot.api import logger
-except Exception:  # pragma: no cover - unit tests without astrbot runtime
-    import logging
-
-    logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 from .interaction_service import InteractionService
 from .llm_analysis_service import LLMAnalysisService
@@ -149,11 +144,6 @@ class GroupDigestService:
         config = analysis_config or LLMAnalysisConfig()
         cache_mode: ReportMode = mode or period
         prompt_signature = self._build_prompt_signature(config=config, max_topics=max_topics)
-        expected_provider_id, expected_provider_source, expected_provider_err = await self._resolve_expected_provider_id(
-            context=context,
-            event=event,
-            config=config,
-        )
 
         load_start = perf_counter()
         raw_messages = self.storage.load_messages(
@@ -179,7 +169,22 @@ class GroupDigestService:
                 excluded_reasons.get("plugin_sender_id", 0),
             )
 
-        cache_record: ReportCacheRecord | None = None
+        if message_count <= 0:
+            return (
+                None,
+                ReportBuildMetrics(
+                    load_messages_ms=load_messages_ms,
+                    aggregate_stats_ms=0,
+                    llm_analysis_ms=0,
+                ),
+            )
+
+        expected_provider_id, expected_provider_source, expected_provider_err = await self._resolve_expected_provider_id(
+            context=context,
+            event=event,
+            config=config,
+        )
+
         if self.report_cache_store is not None:
             cache_record = self.report_cache_store.get_record(
                 group_id=group_id,
@@ -250,16 +255,6 @@ class GroupDigestService:
                     last_message_ts,
                 )
 
-        if message_count <= 0:
-            return (
-                None,
-                ReportBuildMetrics(
-                    load_messages_ms=load_messages_ms,
-                    aggregate_stats_ms=0,
-                    llm_analysis_ms=0,
-                ),
-            )
-
         report, metrics, rebuilt_count, rebuilt_last_ts = await self._build_report_without_cache(
             context=context,
             event=event,
@@ -294,7 +289,7 @@ class GroupDigestService:
                 source=source,
                 report=self._report_to_payload(report),
             )
-            self.report_cache_store.upsert_record(record)
+            await self.report_cache_store.upsert_record(record)
             logger.info(
                 "[group_digest.cache] cache_write group_id=%s date=%s mode=%s source=%s message_count=%s",
                 group_id,
@@ -481,6 +476,13 @@ class GroupDigestService:
         }
 
     def _report_from_payload(self, payload: dict[str, Any]) -> DigestReport | None:
+        if not isinstance(payload, dict):
+            logger.warning(
+                "[group_digest.cache] cached_report_invalid_payload expected=dict got=%s",
+                type(payload).__name__,
+            )
+            return None
+
         try:
             active_members_raw = payload.get("active_members", [])
             active_members: list[MemberDigest] = []
@@ -492,7 +494,7 @@ class GroupDigestService:
                         MemberDigest(
                             sender_id=str(item.get("sender_id", "")),
                             sender_name=str(item.get("sender_name", "")),
-                            message_count=int(item.get("message_count", 0)),
+                            message_count=self._safe_int(item.get("message_count", 0), field="active_member.message_count"),
                         )
                     )
 
@@ -501,8 +503,8 @@ class GroupDigestService:
                 date_label=str(payload.get("date_label", "")),
                 time_window=str(payload.get("time_window", "")),
                 group_id=str(payload.get("group_id", "")),
-                total_messages=int(payload.get("total_messages", 0)),
-                participant_count=int(payload.get("participant_count", 0)),
+                total_messages=self._safe_int(payload.get("total_messages", 0), field="report.total_messages"),
+                participant_count=self._safe_int(payload.get("participant_count", 0), field="report.participant_count"),
                 active_members=active_members,
                 stats_only=bool(payload.get("stats_only", False)),
                 analysis_notice=str(payload.get("analysis_notice", "")),
@@ -520,14 +522,31 @@ class GroupDigestService:
                     member_interests={
                         str(name).strip(): str(summary).strip()
                         for name, summary in semantic_raw.get("member_interests", {}).items()
-                        if str(name).strip() and str(summary).strip()
+                            if str(name).strip() and str(summary).strip()
                     },
                     overall_summary=str(semantic_raw.get("overall_summary", "")).strip(),
                     suggested_bot_reply=str(semantic_raw.get("suggested_bot_reply", "")).strip(),
                 )
             return report
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[group_digest.cache] cached_report_parse_failed error=%s payload_keys=%s",
+                exc,
+                sorted(payload.keys()),
+            )
             return None
+
+    def _safe_int(self, value: object, *, field: str, default: int = 0) -> int:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            logger.warning(
+                "[group_digest.cache] invalid_int field=%s value=%r fallback=%d",
+                field,
+                value,
+                default,
+            )
+            return default
 
     def generate_today_debug_text(
         self,

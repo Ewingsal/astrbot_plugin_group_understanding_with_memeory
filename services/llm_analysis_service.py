@@ -144,8 +144,8 @@ class LLMAnalysisService:
 
         getter = getattr(context, "get_current_chat_provider_id", None)
         if callable(getter):
-            umo = getattr(event, "unified_msg_origin", None)
-            if umo is None:
+            umo = self._extract_unified_msg_origin(event)
+            if not umo:
                 return "", "", "无法从事件获取 unified_msg_origin，不能自动选择会话模型。"
             try:
                 provider_id = await getter(umo=umo)
@@ -161,6 +161,27 @@ class LLMAnalysisService:
 
         # TODO: 若未来 AstrBot 提供新的 provider 解析 API，可在此补充适配。
         return "", "", "当前 AstrBot 上下文未提供 get_current_chat_provider_id 接口。"
+
+    def _extract_unified_msg_origin(self, event: Any) -> str:
+        value = getattr(event, "unified_msg_origin", None)
+        if value:
+            return str(value)
+
+        getter = getattr(event, "get_unified_msg_origin", None)
+        if callable(getter):
+            try:
+                value = getter()
+            except TypeError:
+                try:
+                    value = getter(event)  # pragma: no cover - 兼容部分实现可能要求显式传参
+                except Exception:
+                    value = None
+            except Exception:
+                value = None
+            if value:
+                return str(value)
+
+        return ""
 
     async def _llm_generate(self, *, context: Any, provider_id: str, prompt: str) -> str:
         llm_generate = getattr(context, "llm_generate", None)

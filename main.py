@@ -12,7 +12,12 @@ except Exception:  # pragma: no cover - fallback for older AstrBot versions
     AstrBotConfig = dict  # type: ignore[misc,assignment]
 
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star, register
+try:
+    from astrbot.api.star import Context, Star, StarTools, register
+except Exception:  # pragma: no cover - fallback for older AstrBot versions
+    from astrbot.api.star import Context, Star, register
+
+    StarTools = None  # type: ignore[assignment]
 
 from .services.digest_service import GroupDigestService, PeriodType
 from .services.group_origin_store import GroupOriginStore
@@ -31,6 +36,7 @@ class GroupDigestPlugin(Star):
         super().__init__(context)
         self.context = context
         self.config = config or {}
+        self._data_dir = self._get_framework_data_dir()
 
         storage_path = self._resolve_storage_path()
         group_origin_path = self._resolve_group_origin_path()
@@ -59,8 +65,8 @@ class GroupDigestPlugin(Star):
             analysis_config_builder=self._build_analysis_config,
             runtime_options=SchedulerRuntimeOptions(
                 title_template=str(self._conf_get("title_template", "群聊兴趣日报（{date}）")),
-                max_active_members=max(1, int(self._conf_get("max_active_members", 5))),
-                max_topics=max(1, int(self._conf_get("max_topics", 5))),
+                max_active_members=self._conf_int("max_active_members", 5, lower=1),
+                max_topics=self._conf_int("max_topics", 5, lower=1),
             ),
         )
 
@@ -95,16 +101,13 @@ class GroupDigestPlugin(Star):
             analysis_provider_id=str(self._conf_get("analysis_provider_id", "")).strip(),
             analysis_prompt_template=str(self._conf_get("analysis_prompt_template", "")).strip(),
             interaction_prompt_template=str(self._conf_get("interaction_prompt_template", "")).strip(),
-            max_messages_for_analysis=max(
-                1,
-                int(self._conf_get("max_messages_for_analysis", 80)),
-            ),
+            max_messages_for_analysis=self._conf_int("max_messages_for_analysis", 80, lower=1),
             fallback_to_stats_only=self._as_bool(self._conf_get("fallback_to_stats_only", True), True),
         )
 
     def _build_scheduler_config(self) -> SchedulerConfig:
-        hour = self._clamp_int(self._conf_get("scheduled_send_hour", 18), lower=0, upper=23, default=18)
-        minute = self._clamp_int(self._conf_get("scheduled_send_minute", 0), lower=0, upper=59, default=0)
+        hour = self._conf_int("scheduled_send_hour", 18, lower=0, upper=23)
+        minute = self._conf_int("scheduled_send_minute", 0, lower=0, upper=59)
         whitelist = self._as_str_list(self._conf_get("scheduled_group_whitelist", []))
         return SchedulerConfig(
             enable_scheduled_proactive_message=self._as_bool(
@@ -128,65 +131,52 @@ class GroupDigestPlugin(Star):
         )
 
     def _resolve_storage_path(self) -> Path:
-        raw = str(
-            self._conf_get("storage_path", "plugin_data/astrbot_plugin_group_digest/messages.json")
-        ).strip()
-        storage_path = Path(raw).expanduser()
-        if storage_path.is_absolute():
-            return storage_path
-
-        return self._resolve_data_dir() / storage_path
+        return self._resolve_data_file_path(
+            "storage_path",
+            "plugin_data/astrbot_plugin_group_digest/messages.json",
+        )
 
     def _resolve_group_origin_path(self) -> Path:
-        raw = str(
-            self._conf_get(
-                "group_origin_storage_path",
-                "plugin_data/astrbot_plugin_group_digest/group_origins.json",
-            )
-        ).strip()
-        path = Path(raw).expanduser()
-        if path.is_absolute():
-            return path
-        return self._resolve_data_dir() / path
+        return self._resolve_data_file_path(
+            "group_origin_storage_path",
+            "plugin_data/astrbot_plugin_group_digest/group_origins.json",
+        )
 
     def _resolve_report_cache_path(self) -> Path:
-        raw = str(
-            self._conf_get(
-                "report_cache_path",
-                "plugin_data/astrbot_plugin_group_digest/report_cache.json",
-            )
-        ).strip()
+        return self._resolve_data_file_path(
+            "report_cache_path",
+            "plugin_data/astrbot_plugin_group_digest/report_cache.json",
+        )
+
+    def _resolve_data_file_path(self, key: str, default: str) -> Path:
+        raw = str(self._conf_get(key, default)).strip()
         path = Path(raw).expanduser()
         if path.is_absolute():
             return path
-        return self._resolve_data_dir() / path
+        return self._data_dir / path
 
-    def _resolve_data_dir(self) -> Path:
-        configured = str(self._conf_get("astrbot_data_dir", "")).strip()
-        if configured:
-            return Path(configured).expanduser()
+    def _get_framework_data_dir(self) -> Path:
+        # 优先使用官方 StarTools 接口。
+        getter = getattr(StarTools, "get_data_dir", None) if StarTools is not None else None
+        if callable(getter):
+            try:
+                value = getter()
+                if value:
+                    return Path(str(value)).expanduser()
+            except Exception as exc:
+                logger.warning("failed to read data dir via StarTools.get_data_dir: %s", exc)
 
-        for attr in ("data_dir", "data_path", "base_data_dir"):
-            value = getattr(self.context, attr, None)
-            if value:
-                try:
-                    candidate = Path(str(value)).expanduser()
-                    if candidate.name == "data" or (candidate / "plugins").exists():
-                        return candidate
-                except Exception:
-                    continue
+        # 兼容部分版本可能挂在 context 上的官方 getter。
+        context_getter = getattr(self.context, "get_data_dir", None)
+        if callable(context_getter):
+            try:
+                value = context_getter()
+                if value:
+                    return Path(str(value)).expanduser()
+            except Exception as exc:
+                logger.warning("failed to read data dir via context.get_data_dir: %s", exc)
 
-        # 尝试从挂载路径推断：.../data/plugins/astrbot_plugin_group_digest/main.py
-        file_path = Path(__file__)
-        parts = [part.lower() for part in file_path.parts]
-        for idx in range(len(parts) - 1):
-            if parts[idx] == "data" and parts[idx + 1] == "plugins":
-                return Path(*file_path.parts[: idx + 1])
-
-        # TODO: 如 AstrBot 暴露稳定 data 目录 API，可替换该回退逻辑。
-        fallback = Path.cwd() / "data"
-        logger.warning("cannot infer astrbot data dir, fallback to %s", fallback)
-        return fallback
+        raise RuntimeError("cannot resolve AstrBot data dir from framework interfaces")
 
     @filter.command("group_digest")
     async def group_digest(self, event: AstrMessageEvent):
@@ -229,8 +219,8 @@ class GroupDigestPlugin(Star):
                 now=now,
                 period=period,
                 title_template=str(self._conf_get("title_template", "群聊兴趣日报（{date}）")),
-                max_active_members=int(self._conf_get("max_active_members", 5)),
-                max_topics=int(self._conf_get("max_topics", 5)),
+                max_active_members=self._conf_int("max_active_members", 5, lower=1),
+                max_topics=self._conf_int("max_topics", 5, lower=1),
                 analysis_config=self._build_analysis_config(),
                 source=source,
             )
@@ -254,7 +244,7 @@ class GroupDigestPlugin(Star):
             debug_text = self.digest_service.generate_today_debug_text(
                 group_id=group_id,
                 now=now,
-                max_active_members=int(self._conf_get("max_active_members", 5)),
+                max_active_members=self._conf_int("max_active_members", 5, lower=1),
             )
         except Exception:
             logger.exception("failed to generate today debug stats")
@@ -299,12 +289,12 @@ class GroupDigestPlugin(Star):
             content=content,
             timestamp=timestamp,
         )
-        self.storage.append_message(record)
+        await self.storage.append_message(record)
 
         if self.scheduler_config.store_group_origin:
             unified_msg_origin = self._extract_unified_msg_origin(event)
             if unified_msg_origin:
-                self.group_origin_store.upsert_group_origin(
+                await self.group_origin_store.upsert_group_origin(
                     group_id=group_id,
                     unified_msg_origin=unified_msg_origin,
                     last_active_at=timestamp,
@@ -427,12 +417,45 @@ class GroupDigestPlugin(Star):
 
         return values
 
-    def _clamp_int(self, value: Any, *, lower: int, upper: int, default: int) -> int:
+    def _conf_int(
+        self,
+        key: str,
+        default: int,
+        *,
+        lower: int | None = None,
+        upper: int | None = None,
+    ) -> int:
+        value = self._conf_get(key, default)
         try:
             num = int(value)
         except (TypeError, ValueError):
+            logger.warning(
+                "[group_digest.config] invalid_int key=%s value=%r fallback=%d",
+                key,
+                value,
+                default,
+            )
             num = default
-        return max(lower, min(upper, num))
+
+        if lower is not None and num < lower:
+            logger.warning(
+                "[group_digest.config] int_below_lower_bound key=%s value=%d lower=%d fallback=%d",
+                key,
+                num,
+                lower,
+                default,
+            )
+            num = lower
+        if upper is not None and num > upper:
+            logger.warning(
+                "[group_digest.config] int_above_upper_bound key=%s value=%d upper=%d fallback=%d",
+                key,
+                num,
+                upper,
+                default,
+            )
+            num = upper
+        return num
 
     def _as_str_list(self, value: Any) -> list[str]:
         if isinstance(value, list):

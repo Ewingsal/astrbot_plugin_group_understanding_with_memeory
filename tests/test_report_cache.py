@@ -83,9 +83,13 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _append(storage: JsonMessageStorage, record: MessageRecord) -> None:
+    _run(storage.append_message(record))
+
+
 def test_cache_hit_without_new_messages(tmp_path: Path) -> None:
     service, storage, _cache = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "今天讨论训练计划", int(datetime(2026, 3, 22, 10, 0, 0).timestamp()))
     )
 
@@ -105,7 +109,7 @@ def test_cache_hit_without_new_messages(tmp_path: Path) -> None:
     assert context_first.llm_calls == 1
 
     # 第二次命令消息与上一条日报输出（历史脏数据）不应进入有效消息集合，也不应导致缓存失效。
-    storage.append_message(
+    _append(storage, 
         MessageRecord(
             "group_1001",
             "u1",
@@ -114,7 +118,7 @@ def test_cache_hit_without_new_messages(tmp_path: Path) -> None:
             int(datetime(2026, 3, 22, 12, 59, 0).timestamp()),
         )
     )
-    storage.append_message(
+    _append(storage, 
         MessageRecord(
             "group_1001",
             "bot_1",
@@ -145,7 +149,7 @@ def test_cache_hit_without_new_messages(tmp_path: Path) -> None:
 
 def test_new_messages_trigger_full_rebuild(tmp_path: Path) -> None:
     service, storage, _cache = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "第一条消息", int(datetime(2026, 3, 22, 10, 0, 0).timestamp()))
     )
 
@@ -163,7 +167,7 @@ def test_new_messages_trigger_full_rebuild(tmp_path: Path) -> None:
         )
     )
 
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u2", "Bob", "第二条消息", int(datetime(2026, 3, 22, 12, 30, 0).timestamp()))
     )
 
@@ -185,7 +189,7 @@ def test_new_messages_trigger_full_rebuild(tmp_path: Path) -> None:
 
 def test_mode_isolation_no_cross_cache(tmp_path: Path) -> None:
     service, storage, _cache = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "同一天消息", int(datetime(2026, 3, 22, 9, 0, 0).timestamp()))
     )
     context = _StubContext(responses=[_valid_unified_json(), _valid_unified_json("scheduled文案")])
@@ -220,7 +224,7 @@ def test_mode_isolation_no_cross_cache(tmp_path: Path) -> None:
 
 def test_group_digest_command_message_does_not_invalidate_today_cache(tmp_path: Path) -> None:
     service, storage, _cache = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "有效聊天", int(datetime(2026, 3, 22, 9, 0, 0).timestamp()))
     )
 
@@ -238,7 +242,7 @@ def test_group_digest_command_message_does_not_invalidate_today_cache(tmp_path: 
         )
     )
 
-    storage.append_message(
+    _append(storage, 
         MessageRecord(
             "group_1001",
             "u2",
@@ -269,13 +273,13 @@ def test_group_digest_command_message_does_not_invalidate_today_cache(tmp_path: 
 
 def test_group_isolation_no_cross_cache(tmp_path: Path) -> None:
     service, storage, _cache = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_a", "u1", "Alice", "A 群消息", int(datetime(2026, 3, 22, 9, 0, 0).timestamp()))
     )
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_a", "u1", "Alice", "/group_digest_today", int(datetime(2026, 3, 22, 9, 1, 0).timestamp()))
     )
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_b", "u2", "Bob", "B 群消息", int(datetime(2026, 3, 22, 9, 5, 0).timestamp()))
     )
 
@@ -310,10 +314,10 @@ def test_group_isolation_no_cross_cache(tmp_path: Path) -> None:
 
 def test_group_digest_debug_today_not_in_llm_input(tmp_path: Path) -> None:
     service, storage, _cache = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "先聊一个正常话题", int(datetime(2026, 3, 22, 9, 0, 0).timestamp()))
     )
-    storage.append_message(
+    _append(storage, 
         MessageRecord(
             "group_1001",
             "u2",
@@ -346,7 +350,7 @@ def test_group_digest_debug_today_not_in_llm_input(tmp_path: Path) -> None:
 
 def test_provider_or_max_messages_change_invalidates_cache(tmp_path: Path) -> None:
     service, storage, _cache = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "固定消息", int(datetime(2026, 3, 22, 10, 0, 0).timestamp()))
     )
 
@@ -381,7 +385,7 @@ def test_provider_or_max_messages_change_invalidates_cache(tmp_path: Path) -> No
 
 def test_scheduler_source_writes_cache(tmp_path: Path) -> None:
     service, storage, cache_store = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "调度消息", int(datetime(2026, 3, 22, 17, 50, 0).timestamp()))
     )
 
@@ -406,7 +410,7 @@ def test_scheduler_source_writes_cache(tmp_path: Path) -> None:
 
 def test_scheduler_reuses_cache_without_real_new_messages(tmp_path: Path) -> None:
     service, storage, _cache = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "调度前有效消息", int(datetime(2026, 3, 22, 17, 50, 0).timestamp()))
     )
 
@@ -424,7 +428,7 @@ def test_scheduler_reuses_cache_without_real_new_messages(tmp_path: Path) -> Non
         )
     )
 
-    storage.append_message(
+    _append(storage, 
         MessageRecord(
             "group_1001",
             "bot_1",
@@ -454,7 +458,7 @@ def test_scheduler_reuses_cache_without_real_new_messages(tmp_path: Path) -> Non
 
 def test_failed_generation_does_not_overwrite_existing_cache(tmp_path: Path) -> None:
     service, storage, cache_store = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "第一条", int(datetime(2026, 3, 22, 10, 0, 0).timestamp()))
     )
 
@@ -476,7 +480,7 @@ def test_failed_generation_does_not_overwrite_existing_cache(tmp_path: Path) -> 
     assert old_record is not None
     old_message_count = old_record.message_count
 
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u2", "Bob", "第二条", int(datetime(2026, 3, 22, 12, 10, 0).timestamp()))
     )
 

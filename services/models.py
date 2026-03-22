@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from astrbot.api import logger
+
 
 @dataclass
 class MessageRecord:
@@ -16,14 +18,35 @@ class MessageRecord:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "MessageRecord":
+    def from_dict(cls, data: dict[str, Any]) -> "MessageRecord | None":
+        if not isinstance(data, dict):
+            logger.warning(
+                "[group_digest.model] invalid_message_record_type expected=dict got=%s",
+                type(data).__name__,
+            )
+            return None
+
+        timestamp = cls._safe_int(data.get("timestamp", 0), field="message.timestamp")
         return cls(
             group_id=str(data.get("group_id", "")),
             sender_id=str(data.get("sender_id", "unknown_sender")),
             sender_name=str(data.get("sender_name", "未知成员")),
             content=str(data.get("content", "")),
-            timestamp=int(data.get("timestamp", 0)),
+            timestamp=timestamp,
         )
+
+    @staticmethod
+    def _safe_int(value: object, *, field: str, default: int = 0) -> int:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            logger.warning(
+                "[group_digest.model] invalid_int field=%s value=%r fallback=%d",
+                field,
+                value,
+                default,
+            )
+            return default
 
 
 @dataclass

@@ -12,12 +12,7 @@ try:
 except Exception:  # pragma: no cover
     ZoneInfo = None  # type: ignore[assignment]
 
-try:
-    from astrbot.api import logger
-except Exception:  # pragma: no cover - unit tests without astrbot runtime
-    import logging
-
-    logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 from .digest_service import GroupDigestService
 from .group_origin_store import GroupOriginRecord, GroupOriginStore

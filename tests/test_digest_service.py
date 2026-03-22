@@ -96,9 +96,13 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _append(storage: JsonMessageStorage, record: MessageRecord) -> None:
+    _run(storage.append_message(record))
+
+
 def test_configured_analysis_provider_has_priority(tmp_path: Path) -> None:
     service, storage = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "今天讨论篮球战术", int(datetime(2026, 3, 22, 10, 0, 0).timestamp()))
     )
 
@@ -129,7 +133,7 @@ def test_configured_analysis_provider_has_priority(tmp_path: Path) -> None:
 
 def test_use_session_provider_when_not_configured(tmp_path: Path) -> None:
     service, storage = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "今天讨论训练计划", int(datetime(2026, 3, 22, 10, 0, 0).timestamp()))
     )
 
@@ -158,7 +162,7 @@ def test_use_session_provider_when_not_configured(tmp_path: Path) -> None:
 
 def test_provider_unavailable_fallback_to_stats_only(tmp_path: Path) -> None:
     service, storage = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "今天讨论训练计划", int(datetime(2026, 3, 22, 10, 0, 0).timestamp()))
     )
 
@@ -185,7 +189,7 @@ def test_provider_unavailable_fallback_to_stats_only(tmp_path: Path) -> None:
 
 def test_model_output_parse_failure_fallback(tmp_path: Path) -> None:
     service, storage = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "今天讨论训练计划", int(datetime(2026, 3, 22, 10, 0, 0).timestamp()))
     )
 
@@ -213,17 +217,17 @@ def test_group_digest_and_group_digest_today_share_same_core_pipeline(tmp_path: 
     service, storage = _build_service(tmp_path)
 
     # 昨天
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "AI 训练 复盘", int(datetime(2026, 3, 21, 9, 0, 0).timestamp()))
     )
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u2", "Bob", "AI 战术", int(datetime(2026, 3, 21, 10, 0, 0).timestamp()))
     )
     # 今天
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "AI 训练 复盘", int(datetime(2026, 3, 22, 9, 0, 0).timestamp()))
     )
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u2", "Bob", "AI 战术", int(datetime(2026, 3, 22, 10, 0, 0).timestamp()))
     )
 
@@ -270,7 +274,7 @@ def test_group_digest_and_group_digest_today_share_same_core_pipeline(tmp_path: 
 
 def test_provider_unavailable_without_fallback_returns_clear_error(tmp_path: Path) -> None:
     service, storage = _build_service(tmp_path)
-    storage.append_message(
+    _append(storage, 
         MessageRecord("group_1001", "u1", "Alice", "今天讨论训练计划", int(datetime(2026, 3, 22, 10, 0, 0).timestamp()))
     )
 
