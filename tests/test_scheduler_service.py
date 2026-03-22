@@ -20,7 +20,7 @@ from astrbot_plugin_group_digest.services.scheduler_service import SchedulerRunt
 class _DigestStub:
     def __init__(
         self,
-        reports_by_group: dict[str, DigestReport | None],
+        reports_by_group: dict[str, DigestReport | None | Exception],
         sleep_by_group: dict[str, float] | None = None,
     ):
         self.reports_by_group = reports_by_group
@@ -60,8 +60,11 @@ class _DigestStub:
             sleep_seconds = float(self.sleep_by_group.get(group_id, 0.0))
             if sleep_seconds > 0:
                 await asyncio.sleep(sleep_seconds)
+            result = self.reports_by_group.get(group_id)
+            if isinstance(result, Exception):
+                raise result
             return (
-                self.reports_by_group.get(group_id),
+                result,
                 ReportBuildMetrics(load_messages_ms=1, aggregate_stats_ms=2, llm_analysis_ms=3),
             )
         finally:
@@ -99,7 +102,7 @@ def _upsert(store: GroupOriginStore, **kwargs) -> None:
 def _new_service(
     tmp_path: Path,
     *,
-    reports_by_group: dict[str, DigestReport | None],
+    reports_by_group: dict[str, DigestReport | None | Exception],
     sent: list[tuple[str, str]],
     sleep_by_group: dict[str, float] | None = None,
 ) -> tuple[ScheduledProactiveService, GroupOriginStore, _DigestStub]:
@@ -324,3 +327,25 @@ def test_scheduler_respects_max_concurrent_groups(tmp_path: Path) -> None:
     assert digest.max_inflight <= 2
     assert digest.max_inflight >= 2
     assert len(sent) == 4
+
+
+def test_scheduler_group_failure_does_not_break_other_groups(tmp_path: Path) -> None:
+    sent: list[tuple[str, str]] = []
+    service, store, _digest = _new_service(
+        tmp_path,
+        reports_by_group={
+            "group_a": RuntimeError("group_a_failed"),
+            "group_b": _report("group_b", "B 群主动发言"),
+        },
+        sent=sent,
+    )
+    _configure_service(service, enable=False, max_concurrent_groups=2)
+
+    _upsert(store, group_id="group_a", unified_msg_origin="umo_a", last_active_at=111)
+    _upsert(store, group_id="group_b", unified_msg_origin="umo_b", last_active_at=222)
+
+    result = _run(service.run_once_for_time(datetime(2026, 3, 22, 18, 0, 0)))
+
+    assert "group_a" in result.failed_groups
+    assert result.sent_groups == ["group_b"]
+    assert sent == [("umo_b", "B 群主动发言")]

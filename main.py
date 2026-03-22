@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -37,6 +38,7 @@ class GroupDigestPlugin(Star):
         self.context = context
         self.config = config or {}
         self._data_dir = self._get_framework_data_dir()
+        self._data_dir_scope = self._detect_data_dir_scope(self._data_dir)
 
         storage_path = self._resolve_storage_path()
         group_origin_path = self._resolve_group_origin_path()
@@ -60,18 +62,18 @@ class GroupDigestPlugin(Star):
             group_origin_store=self.group_origin_store,
         )
         self.scheduler_config = self._build_scheduler_config()
-        self.scheduler_service.start(
-            scheduler_config=self.scheduler_config,
-            analysis_config_builder=self._build_analysis_config,
-            runtime_options=SchedulerRuntimeOptions(
-                title_template=str(self._conf_get("title_template", "群聊兴趣日报（{date}）")),
-                max_active_members=self._conf_int("max_active_members", 5, lower=1),
-                max_topics=self._conf_int("max_topics", 5, lower=1),
-            ),
+        self._scheduler_runtime_options = SchedulerRuntimeOptions(
+            title_template=str(self._conf_get("title_template", "群聊兴趣日报（{date}）")),
+            max_active_members=self._conf_int("max_active_members", 5, lower=1),
+            max_topics=self._conf_int("max_topics", 5, lower=1),
         )
+        self._scheduler_start_lock: asyncio.Lock | None = None
+        self._scheduler_started = False
 
         logger.info(
-            "GroupDigestPlugin initialized. storage=%s group_origin_store=%s report_cache=%s",
+            "GroupDigestPlugin initialized. data_dir=%s data_dir_scope=%s storage=%s group_origin_store=%s report_cache=%s",
+            self._data_dir,
+            self._data_dir_scope,
             storage_path,
             group_origin_path,
             report_cache_path,
@@ -133,19 +135,19 @@ class GroupDigestPlugin(Star):
     def _resolve_storage_path(self) -> Path:
         return self._resolve_data_file_path(
             "storage_path",
-            "plugin_data/astrbot_plugin_group_digest/messages.json",
+            self._default_storage_relative_path("messages.json"),
         )
 
     def _resolve_group_origin_path(self) -> Path:
         return self._resolve_data_file_path(
             "group_origin_storage_path",
-            "plugin_data/astrbot_plugin_group_digest/group_origins.json",
+            self._default_storage_relative_path("group_origins.json"),
         )
 
     def _resolve_report_cache_path(self) -> Path:
         return self._resolve_data_file_path(
             "report_cache_path",
-            "plugin_data/astrbot_plugin_group_digest/report_cache.json",
+            self._default_storage_relative_path("report_cache.json"),
         )
 
     def _resolve_data_file_path(self, key: str, default: str) -> Path:
@@ -153,7 +155,35 @@ class GroupDigestPlugin(Star):
         path = Path(raw).expanduser()
         if path.is_absolute():
             return path
-        return self._data_dir / path
+        return self._data_dir / self._normalize_relative_data_path(path)
+
+    def _default_storage_relative_path(self, file_name: str) -> str:
+        if self._data_dir_scope == "plugin_dir":
+            return file_name
+        return f"plugin_data/astrbot_plugin_group_digest/{file_name}"
+
+    def _normalize_relative_data_path(self, path: Path) -> Path:
+        if self._data_dir_scope != "plugin_dir":
+            return path
+
+        lower_parts = [part.lower() for part in path.parts]
+        if len(lower_parts) >= 3 and lower_parts[0] == "plugin_data" and lower_parts[1] == "astrbot_plugin_group_digest":
+            normalized = Path(*path.parts[2:])
+            logger.info(
+                "[group_digest.path] strip_legacy_plugin_data_prefix raw=%s normalized=%s",
+                path,
+                normalized,
+            )
+            return normalized
+        return path
+
+    def _detect_data_dir_scope(self, data_dir: Path) -> str:
+        lower_parts = [part.lower() for part in data_dir.parts]
+        if data_dir.name.lower() == "astrbot_plugin_group_digest":
+            return "plugin_dir"
+        if len(lower_parts) >= 2 and lower_parts[-2] == "plugin_data" and lower_parts[-1] == "astrbot_plugin_group_digest":
+            return "plugin_dir"
+        return "root_dir"
 
     def _get_framework_data_dir(self) -> Path:
         # 优先使用官方 StarTools 接口。
@@ -204,6 +234,8 @@ class GroupDigestPlugin(Star):
         period: PeriodType,
         private_hint: str,
     ) -> AsyncGenerator[Any, None]:
+        await self._ensure_scheduler_started()
+
         group_id = self._extract_group_id(event)
         if not group_id:
             yield event.plain_result(private_hint)
@@ -234,6 +266,8 @@ class GroupDigestPlugin(Star):
     @filter.command("group_digest_debug_today")
     async def group_digest_debug_today(self, event: AstrMessageEvent):
         """调试命令：统计今天消息，辅助联调归档链路。"""
+        await self._ensure_scheduler_started()
+
         group_id = self._extract_group_id(event)
         if not group_id:
             yield event.plain_result("/group_digest_debug_today 仅支持群聊使用，请在群聊中触发。")
@@ -256,6 +290,8 @@ class GroupDigestPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def archive_group_message(self, event: AstrMessageEvent):
         """归档群聊消息到本地 JSON，供昨日/今日统计使用。"""
+        await self._ensure_scheduler_started()
+
         group_id = self._extract_group_id(event)
         if not group_id:
             return
@@ -299,6 +335,39 @@ class GroupDigestPlugin(Star):
                     unified_msg_origin=unified_msg_origin,
                     last_active_at=timestamp,
                 )
+
+    async def initialize(self):
+        """框架异步初始化钩子：在事件循环就绪后确保 scheduler 启动。"""
+        await self._ensure_scheduler_started()
+
+    async def _ensure_scheduler_started(self) -> None:
+        if self._scheduler_started:
+            return
+
+        lock = self._get_scheduler_start_lock()
+        async with lock:
+            if self._scheduler_started:
+                return
+
+            started = self.scheduler_service.start(
+                scheduler_config=self.scheduler_config,
+                analysis_config_builder=self._build_analysis_config,
+                runtime_options=self._scheduler_runtime_options,
+            )
+            if started:
+                self._scheduler_started = True
+                logger.info(
+                    "GroupDigestPlugin scheduler start ensured. enabled=%s",
+                    self.scheduler_config.enable_scheduled_proactive_message,
+                )
+                return
+
+            logger.error("GroupDigestPlugin scheduler start failed; will retry on next event.")
+
+    def _get_scheduler_start_lock(self) -> asyncio.Lock:
+        if self._scheduler_start_lock is None:
+            self._scheduler_start_lock = asyncio.Lock()
+        return self._scheduler_start_lock
 
     def _extract_group_id(self, event: AstrMessageEvent) -> str:
         """尽量兼容不同平台适配器的 group_id 读取方式。"""

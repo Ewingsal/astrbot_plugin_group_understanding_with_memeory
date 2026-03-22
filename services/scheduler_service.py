@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from time import perf_counter
@@ -95,20 +96,20 @@ class ScheduledProactiveService:
         scheduler_config: SchedulerConfig,
         analysis_config_builder: Callable[[], LLMAnalysisConfig],
         runtime_options: SchedulerRuntimeOptions,
-    ) -> None:
-        self._scheduler_config = scheduler_config
+    ) -> bool:
+        self._scheduler_config = copy.deepcopy(scheduler_config)
         self._analysis_config_builder = analysis_config_builder
-        self._runtime_options = runtime_options
-        self._timezone = self._resolve_timezone(scheduler_config.scheduled_send_timezone)
+        self._runtime_options = copy.deepcopy(runtime_options)
+        self._timezone = self._resolve_timezone(self._scheduler_config.scheduled_send_timezone)
         max_concurrent_groups = self._normalized_max_concurrent_groups(self._runtime_options.max_concurrent_groups)
 
-        if not scheduler_config.enable_scheduled_proactive_message:
+        if not self._scheduler_config.enable_scheduled_proactive_message:
             logger.info("[group_digest.scheduler] disabled by config")
-            return
+            return True
 
         if self._task and not self._task.done():
             logger.warning("[group_digest.scheduler] already running, skip duplicate start")
-            return
+            return True
 
         self._stop_event = None
         self._is_running = True
@@ -117,17 +118,18 @@ class ScheduledProactiveService:
         except RuntimeError:
             self._is_running = False
             logger.exception("[group_digest.scheduler] failed to start: no running event loop")
-            return
+            return False
 
         logger.info(
             "[group_digest.scheduler] started. time=%02d:%02d mode=%s timezone=%s whitelist_enabled=%s max_concurrent_groups=%d",
-            scheduler_config.scheduled_send_hour,
-            scheduler_config.scheduled_send_minute,
-            scheduler_config.scheduled_mode,
-            scheduler_config.scheduled_send_timezone,
-            scheduler_config.scheduled_group_whitelist_enabled,
+            self._scheduler_config.scheduled_send_hour,
+            self._scheduler_config.scheduled_send_minute,
+            self._scheduler_config.scheduled_mode,
+            self._scheduler_config.scheduled_send_timezone,
+            self._scheduler_config.scheduled_group_whitelist_enabled,
             max_concurrent_groups,
         )
+        return True
 
     async def stop(self) -> None:
         self._is_running = False
@@ -200,7 +202,25 @@ class ScheduledProactiveService:
             )
             for record in records
         ]
-        group_results = await asyncio.gather(*tasks) if tasks else []
+        raw_results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
+        group_results: list[_GroupProcessResult] = []
+        for idx, item in enumerate(raw_results):
+            if isinstance(item, Exception):
+                group_id = records[idx].group_id if idx < len(records) else "unknown_group"
+                logger.error(
+                    "[group_digest.scheduler] group_task_failed group=%s",
+                    group_id,
+                    exc_info=(type(item), item, item.__traceback__),
+                )
+                group_results.append(
+                    _GroupProcessResult(
+                        group_id=group_id,
+                        status="failed",
+                        reason=f"unhandled_exception: {item}",
+                    )
+                )
+                continue
+            group_results.append(item)
 
         skipped_missing_origin: list[str] = []
         skipped_whitelist: list[str] = []

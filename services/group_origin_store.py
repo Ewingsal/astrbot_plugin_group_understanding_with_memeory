@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +26,7 @@ class GroupOriginStore:
     def __init__(self, file_path: Path):
         self.file_path = file_path
         self._lock: asyncio.Lock | None = None
+        self._file_lock = threading.RLock()
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.file_path.exists():
             self._write_raw({"groups": {}})
@@ -38,14 +42,15 @@ class GroupOriginStore:
             return
 
         async with self._get_lock():
-            payload = self._read_raw()
-            groups = payload.setdefault("groups", {})
-            groups[str(group_id)] = {
-                "unified_msg_origin": str(unified_msg_origin),
-                "last_active_at": self._safe_int(last_active_at, default=0, field="last_active_at"),
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
-            }
-            self._write_raw(payload)
+            with self._file_lock:
+                payload = self._read_raw_unlocked()
+                groups = payload.setdefault("groups", {})
+                groups[str(group_id)] = {
+                    "unified_msg_origin": str(unified_msg_origin),
+                    "last_active_at": self._safe_int(last_active_at, default=0, field="last_active_at"),
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                self._write_raw_unlocked(payload)
 
     def list_group_records(self) -> list[GroupOriginRecord]:
         payload = self._read_raw()
@@ -79,6 +84,10 @@ class GroupOriginStore:
         return records
 
     def _read_raw(self) -> dict:
+        with self._file_lock:
+            return self._read_raw_unlocked()
+
+    def _read_raw_unlocked(self) -> dict:
         try:
             text = self.file_path.read_text(encoding="utf-8")
             obj = json.loads(text)
@@ -99,10 +108,11 @@ class GroupOriginStore:
             return {"groups": {}}
 
     def _write_raw(self, payload: dict) -> None:
-        self.file_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with self._file_lock:
+            self._write_raw_unlocked(payload)
+
+    def _write_raw_unlocked(self, payload: dict) -> None:
+        self._atomic_write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
     def _safe_int(self, value: object, *, default: int, field: str) -> int:
         try:
@@ -120,3 +130,24 @@ class GroupOriginStore:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    def _atomic_write_text(self, text: str) -> None:
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(self.file_path.parent),
+                prefix=f".{self.file_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_file:
+                tmp_file.write(text)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+                tmp_path = Path(tmp_file.name)
+            os.replace(tmp_path, self.file_path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -19,15 +22,17 @@ class JsonMessageStorage:
     def __init__(self, file_path: Path):
         self.file_path = file_path
         self._lock: asyncio.Lock | None = None
+        self._file_lock = threading.RLock()
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.file_path.exists():
-            self.file_path.write_text("[]", encoding="utf-8")
+            self._atomic_write_text("[]")
 
     async def append_message(self, record: MessageRecord) -> None:
         async with self._get_lock():
-            records = self._read_records()
-            records.append(record)
-            self._write_records(records)
+            with self._file_lock:
+                records = self._read_records_unlocked()
+                records.append(record)
+                self._write_records_unlocked(records)
 
     def load_messages(
         self,
@@ -96,6 +101,10 @@ class JsonMessageStorage:
         return int(today_start.timestamp()), int(tomorrow_start.timestamp())
 
     def _read_records(self) -> list[MessageRecord]:
+        with self._file_lock:
+            return self._read_records_unlocked()
+
+    def _read_records_unlocked(self) -> list[MessageRecord]:
         try:
             payload = self.file_path.read_text(encoding="utf-8")
             data = json.loads(payload)
@@ -127,11 +136,33 @@ class JsonMessageStorage:
             return []
 
     def _write_records(self, rows: list[MessageRecord]) -> None:
+        with self._file_lock:
+            self._write_records_unlocked(rows)
+
+    def _write_records_unlocked(self, rows: list[MessageRecord]) -> None:
         payload = [row.to_dict() for row in rows]
-        self.file_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._atomic_write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def _atomic_write_text(self, text: str) -> None:
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(self.file_path.parent),
+                prefix=f".{self.file_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_file:
+                tmp_file.write(text)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+                tmp_path = Path(tmp_file.name)
+            os.replace(tmp_path, self.file_path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
 
     def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -83,6 +86,7 @@ class ReportCacheStore:
         self.file_path = file_path
         self.cache_version = int(cache_version)
         self._lock: asyncio.Lock | None = None
+        self._file_lock = threading.RLock()
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.file_path.exists():
             self._write_raw({"cache_version": self.cache_version, "entries": {}})
@@ -113,21 +117,26 @@ class ReportCacheStore:
 
     async def upsert_record(self, record: ReportCacheRecord) -> None:
         async with self._get_lock():
-            payload = self._read_raw()
-            entries = payload.setdefault("entries", {})
-            if not isinstance(entries, dict):
-                entries = {}
-                payload["entries"] = entries
+            with self._file_lock:
+                payload = self._read_raw_unlocked()
+                entries = payload.setdefault("entries", {})
+                if not isinstance(entries, dict):
+                    entries = {}
+                    payload["entries"] = entries
 
-            key = self._build_key(group_id=record.group_id, date=record.date, mode=record.mode)
-            entries[key] = record.to_dict()
-            payload["cache_version"] = self.cache_version
-            self._write_raw(payload)
+                key = self._build_key(group_id=record.group_id, date=record.date, mode=record.mode)
+                entries[key] = record.to_dict()
+                payload["cache_version"] = self.cache_version
+                self._write_raw_unlocked(payload)
 
     def _build_key(self, *, group_id: str, date: str, mode: str) -> str:
         return f"{group_id}::{date}::{mode}"
 
     def _read_raw(self) -> dict[str, Any]:
+        with self._file_lock:
+            return self._read_raw_unlocked()
+
+    def _read_raw_unlocked(self) -> dict[str, Any]:
         try:
             data = json.loads(self.file_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
@@ -147,12 +156,34 @@ class ReportCacheStore:
             return {"cache_version": self.cache_version, "entries": {}}
 
     def _write_raw(self, payload: dict[str, Any]) -> None:
-        self.file_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with self._file_lock:
+            self._write_raw_unlocked(payload)
+
+    def _write_raw_unlocked(self, payload: dict[str, Any]) -> None:
+        self._atomic_write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
     def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    def _atomic_write_text(self, text: str) -> None:
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(self.file_path.parent),
+                prefix=f".{self.file_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_file:
+                tmp_file.write(text)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+                tmp_path = Path(tmp_file.name)
+            os.replace(tmp_path, self.file_path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
