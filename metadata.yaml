@@ -3,4 +3,4 @@ display_name: 群聊兴趣日报
 desc: 群聊兴趣日报与主动互动插件，支持 /group_digest、/group_digest_today、/group_digest_debug_today、每日定时主动发言与日报缓存复用（LLM 语义分析版）。
 version: 0.6.0
 author: Ewingsal
-repo: astrbot_plugin_group_digest
+repo: https://github.com/Ewingsal/astrbot_plugin_group_digest
