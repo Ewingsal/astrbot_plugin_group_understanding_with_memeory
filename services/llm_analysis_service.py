@@ -80,6 +80,8 @@ class LLMAnalysisService:
         max_topics: int,
         resolved_provider_id: str | None = None,
         resolved_provider_source: str = "",
+        topic_slice_contexts: list[str] | None = None,
+        semantic_input_source: str = "",
     ) -> LLMAnalysisOutcome:
         if not config.use_llm_topic_analysis:
             return LLMAnalysisOutcome(notice="语义分析已关闭（use_llm_topic_analysis=false）。")
@@ -100,8 +102,8 @@ class LLMAnalysisService:
         if not provider_id:
             return LLMAnalysisOutcome(error=provider_err or "未找到可用的分析模型 provider。")
 
-        selected_messages = self._select_messages(messages, max_count=config.max_messages_for_analysis)
-        messages_payload = self._build_messages_payload(selected_messages)
+        prepared_messages = self._prepare_messages(messages)
+        messages_payload = self._build_messages_payload(prepared_messages)
 
         try:
             analysis_prompt = self._build_analysis_prompt(
@@ -112,6 +114,8 @@ class LLMAnalysisService:
                 messages_payload=messages_payload,
                 active_members=active_members,
                 max_topics=max_topics,
+                topic_slice_contexts=topic_slice_contexts or [],
+                semantic_input_source=semantic_input_source,
             )
         except Exception as exc:
             return LLMAnalysisOutcome(
@@ -163,6 +167,8 @@ class LLMAnalysisService:
         max_topics: int,
         resolved_provider_id: str | None = None,
         resolved_provider_source: str = "",
+        topic_slice_contexts: list[str] | None = None,
+        semantic_input_source: str = "",
     ) -> LLMAnalysisOutcome:
         if not config.use_llm_topic_analysis:
             return LLMAnalysisOutcome(notice="语义分析已关闭（use_llm_topic_analysis=false）。")
@@ -183,10 +189,7 @@ class LLMAnalysisService:
         if not provider_id:
             return LLMAnalysisOutcome(error=provider_err or "未找到可用的分析模型 provider。")
 
-        selected_delta_messages = self._select_messages(
-            delta_messages,
-            max_count=config.max_messages_for_analysis,
-        )
+        selected_delta_messages = self._prepare_messages(delta_messages)
         delta_payload = self._build_messages_payload(selected_delta_messages)
 
         try:
@@ -199,6 +202,8 @@ class LLMAnalysisService:
                 previous_semantic_state=previous_semantic_state,
                 updated_stats_state=updated_stats_state,
                 max_topics=max_topics,
+                topic_slice_contexts=topic_slice_contexts or [],
+                semantic_input_source=semantic_input_source,
             )
         except Exception as exc:
             return LLMAnalysisOutcome(
@@ -326,11 +331,9 @@ class LLMAnalysisService:
 
         raise RuntimeError("LLM 返回中没有可解析的文本字段。")
 
-    def _select_messages(self, messages: list[MessageRecord], max_count: int) -> list[MessageRecord]:
-        ordered = sorted(messages, key=lambda item: item.timestamp)
-        if max_count <= 0:
-            return ordered
-        return ordered[-max_count:]
+    def _prepare_messages(self, messages: list[MessageRecord]) -> list[MessageRecord]:
+        # 语义输入选样由 SemanticInputBuilder 负责，这里仅保证时序稳定。
+        return sorted(messages, key=lambda item: item.timestamp)
 
     def _build_messages_payload(self, messages: list[MessageRecord]) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
@@ -355,6 +358,8 @@ class LLMAnalysisService:
         messages_payload: list[dict[str, Any]],
         active_members: list[MemberDigest],
         max_topics: int,
+        topic_slice_contexts: list[str],
+        semantic_input_source: str,
     ) -> str:
         custom_template = config.analysis_prompt_template.strip()
         template = custom_template or DEFAULT_ANALYSIS_PROMPT_TEMPLATE
@@ -367,6 +372,8 @@ class LLMAnalysisService:
             "message_count": len(messages_payload),
             "messages_json": json.dumps(messages_payload, ensure_ascii=False, indent=2),
             "active_member_names": ", ".join(active_member_names),
+            "semantic_input_source": semantic_input_source or "raw_effective_messages_tail",
+            "topic_slice_contexts_json": json.dumps(topic_slice_contexts, ensure_ascii=False, indent=2),
         }
 
         if custom_template:
@@ -404,6 +411,19 @@ class LLMAnalysisService:
                 f"{interaction_style_hint}\n\n"
                 "注意：最终仍需输出同一个 JSON 对象，并包含 suggested_bot_reply 字段。"
             )
+        if topic_slice_contexts:
+            joined_slices = "\n\n".join(
+                f"[Slice {idx}] {text}"
+                for idx, text in enumerate(topic_slice_contexts, start=1)
+                if str(text).strip()
+            )
+            if joined_slices:
+                prompt = (
+                    f"{prompt}\n\n"
+                    f"语义输入来源：{semantic_input_source or 'topic_slices_plus_tail_raw_messages'}\n"
+                    "补充话题切片上下文（用于覆盖长时段信息，优先与消息样本交叉验证）：\n"
+                    f"{joined_slices}"
+                )
         return prompt
 
     def _build_incremental_analysis_prompt(
@@ -417,6 +437,8 @@ class LLMAnalysisService:
         previous_semantic_state: dict[str, Any],
         updated_stats_state: dict[str, Any],
         max_topics: int,
+        topic_slice_contexts: list[str],
+        semantic_input_source: str,
     ) -> str:
         template = DEFAULT_INCREMENTAL_ANALYSIS_PROMPT_TEMPLATE
         template_vars = {
@@ -428,6 +450,8 @@ class LLMAnalysisService:
             "delta_messages_json": json.dumps(delta_messages_payload, ensure_ascii=False, indent=2),
             "previous_semantic_json": json.dumps(previous_semantic_state, ensure_ascii=False, indent=2),
             "stats_state_json": json.dumps(updated_stats_state, ensure_ascii=False, indent=2),
+            "semantic_input_source": semantic_input_source or "delta_tail_messages",
+            "topic_slice_contexts_json": json.dumps(topic_slice_contexts, ensure_ascii=False, indent=2),
         }
         try:
             prompt = template.format(**template_vars)
@@ -446,6 +470,19 @@ class LLMAnalysisService:
                 f"{interaction_style_hint}\n\n"
                 "注意：最终仍需输出同一个 JSON 对象，并包含 suggested_bot_reply 字段。"
             )
+        if topic_slice_contexts:
+            joined_slices = "\n\n".join(
+                f"[Slice {idx}] {text}"
+                for idx, text in enumerate(topic_slice_contexts, start=1)
+                if str(text).strip()
+            )
+            if joined_slices:
+                prompt = (
+                    f"{prompt}\n\n"
+                    f"语义输入来源：{semantic_input_source or 'topic_slices_plus_delta_tail_messages'}\n"
+                    "补充话题切片上下文（用于维持全天语义连续性）：\n"
+                    f"{joined_slices}"
+                )
         return prompt
 
     def _parse_json_object(self, text: str) -> dict[str, Any]:

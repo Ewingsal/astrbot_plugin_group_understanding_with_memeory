@@ -24,6 +24,216 @@
     "description": "日报缓存文件路径。相对路径将拼接到 data 目录下。",
     "default": "plugin_data/astrbot_plugin_group_digest/report_cache.json"
   },
+  "enable_topic_lifecycle_sweep": {
+    "type": "bool",
+    "description": "是否启用话题生命周期后台 sweep（用于无新消息时推进 topic close 与单消息超时闭合）。",
+    "default": true
+  },
+  "topic_lifecycle_sweep_interval_seconds": {
+    "type": "int",
+    "description": "话题生命周期后台 sweep 周期（秒）。",
+    "default": 60
+  },
+  "topic_runtime_closed_prune_seconds": {
+    "type": "int",
+    "description": "runtime 内存中 closed 且已持久化 topic 的保留时长（秒），超时后可被 prune。",
+    "default": 21600
+  },
+  "enable_topic_embedding": {
+    "type": "bool",
+    "description": "是否启用 topic embedding（用于 transfer buffer 判断）。",
+    "default": false
+  },
+  "embedding_api_key": {
+    "type": "string",
+    "description": "embedding API key（enable_topic_embedding=true 时使用）。",
+    "default": ""
+  },
+  "embedding_model": {
+    "type": "string",
+    "description": "embedding 模型名（enable_topic_embedding=true 时使用）。",
+    "default": ""
+  },
+  "embedding_base_url": {
+    "type": "string",
+    "description": "embedding API base_url，留空默认 https://api.openai.com/v1。",
+    "default": ""
+  },
+  "embedding_timeout_seconds": {
+    "type": "int",
+    "description": "embedding API 超时时间（秒）。",
+    "default": 10
+  },
+  "embedding_version": {
+    "type": "string",
+    "description": "embedding 版本标识（写入 embedding store payload）。",
+    "default": "v1"
+  },
+  "enable_qdrant_embedding_store": {
+    "type": "bool",
+    "description": "是否启用 Qdrant embedding 持久化层（semantic_unit/topic_slice）。",
+    "default": false
+  },
+  "qdrant_url": {
+    "type": "string",
+    "description": "Qdrant 服务地址，例如 http://127.0.0.1:6333。",
+    "default": ""
+  },
+  "qdrant_api_key": {
+    "type": "string",
+    "description": "Qdrant API Key（如服务未开启鉴权可留空）。",
+    "default": ""
+  },
+  "qdrant_semantic_unit_collection": {
+    "type": "string",
+    "description": "semantic_unit embeddings 使用的 Qdrant collection 名称。",
+    "default": "group_digest_semantic_units"
+  },
+  "qdrant_topic_slice_collection": {
+    "type": "string",
+    "description": "topic_slice/core embeddings 使用的 Qdrant collection 名称。",
+    "default": "group_digest_topic_slices"
+  },
+  "qdrant_vector_size": {
+    "type": "int",
+    "description": "Qdrant 向量维度（需与 embedding 模型输出维度一致）。",
+    "default": 1536
+  },
+  "qdrant_distance_metric": {
+    "type": "string",
+    "description": "Qdrant 距离度量，默认 cosine（可选 dot/euclid/manhattan）。",
+    "default": "cosine"
+  },
+  "qdrant_prefer_grpc": {
+    "type": "bool",
+    "description": "预留配置：是否偏好 gRPC（当前实现走 HTTP API）。",
+    "default": false
+  },
+  "qdrant_timeout_seconds": {
+    "type": "int",
+    "description": "Qdrant 请求超时时间（秒）。",
+    "default": 5
+  },
+  "enable_topic_slice_retrieval": {
+    "type": "bool",
+    "description": "是否启用 topic_slice retrieval（仅用于增强 digest 语义输入）。",
+    "default": true
+  },
+  "topic_slice_retrieval_recent_days": {
+    "type": "int",
+    "description": "retrieval 回看历史天数（不含当前统计日）。",
+    "default": 3
+  },
+  "topic_slice_retrieval_limit": {
+    "type": "int",
+    "description": "retrieval 最多返回的 topic_slice 数量。",
+    "default": 5
+  },
+  "topic_slice_retrieval_query_message_count": {
+    "type": "int",
+    "description": "用于构造 retrieval 查询文本的 tail 消息条数。",
+    "default": 8
+  },
+  "slang_store_path": {
+    "type": "string",
+    "description": "黑话解释存储目录（按群 JSONL）。相对路径将拼接到 data 目录下。",
+    "default": "plugin_data/astrbot_plugin_group_digest/slang"
+  },
+  "enable_slang_contexts": {
+    "type": "bool",
+    "description": "是否在语义输入中注入群黑话解释上下文。",
+    "default": false
+  },
+  "enable_slang_learning": {
+    "type": "bool",
+    "description": "是否启用候选黑话自动解释（需要可用的 embedding + retrieval + LLM provider）。",
+    "default": false
+  },
+  "slang_recent_days": {
+    "type": "int",
+    "description": "黑话候选挖掘时回看 topic slices 的天数。",
+    "default": 7
+  },
+  "slang_injection_limit": {
+    "type": "int",
+    "description": "每次语义输入最多注入的黑话解释条数。",
+    "default": 5
+  },
+  "max_slang_context_chars": {
+    "type": "int",
+    "description": "黑话解释上下文总字符数硬上限（超出后截断）。",
+    "default": 1200
+  },
+  "slang_candidate_min_term_frequency": {
+    "type": "int",
+    "description": "黑话候选统计预筛：最小词频阈值。",
+    "default": 2
+  },
+  "slang_candidate_min_slice_coverage": {
+    "type": "int",
+    "description": "黑话候选统计预筛：最小 slice 覆盖数阈值。",
+    "default": 2
+  },
+  "slang_candidate_max_candidates": {
+    "type": "int",
+    "description": "每轮候选挖掘最多保留条目数。",
+    "default": 10
+  },
+  "slang_candidate_current_day_boost": {
+    "type": "float",
+    "description": "黑话候选统计预筛：当前日命中加权系数。",
+    "default": 0.4
+  },
+  "slang_retrieval_recent_days": {
+    "type": "int",
+    "description": "黑话解释时通过向量检索回看的历史天数。",
+    "default": 7
+  },
+  "slang_retrieval_limit": {
+    "type": "int",
+    "description": "黑话解释时每个候选最多检索的历史语境条数。",
+    "default": 6
+  },
+  "slang_min_context_items_for_inference": {
+    "type": "int",
+    "description": "触发黑话解释所需最小历史语境条数。",
+    "default": 2
+  },
+  "slang_max_inference_per_build": {
+    "type": "int",
+    "description": "单次语义构建最多触发的黑话解释次数。",
+    "default": 3
+  },
+  "slang_reinfer_min_evidence_increase": {
+    "type": "int",
+    "description": "已有黑话解释在证据增长达到该阈值时才重新解释。",
+    "default": 2
+  },
+  "new_topic_gap_seconds": {
+    "type": "int",
+    "description": "有效消息之间超过该间隔时，直接视为新 topic 起点。",
+    "default": 1800
+  },
+  "topic_close_gap_seconds": {
+    "type": "int",
+    "description": "topic 在无新有效消息超过该间隔后自动 close。",
+    "default": 1200
+  },
+  "single_message_topic_timeout_seconds": {
+    "type": "int",
+    "description": "仅有一条有效消息时，等待该时长后生成单消息 topic 并 close。",
+    "default": 900
+  },
+  "transfer_similarity_threshold": {
+    "type": "float",
+    "description": "semantic unit 与 topic core 相似度低于该阈值时进入 transfer buffer。",
+    "default": 0.75
+  },
+  "transfer_buffer_size": {
+    "type": "int",
+    "description": "transfer buffer 触发新 topic 的 semantic unit 数量阈值。",
+    "default": 3
+  },
   "max_active_members": {
     "type": "int",
     "description": "活跃成员排行展示数量",

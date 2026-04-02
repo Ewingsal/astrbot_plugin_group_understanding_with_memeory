@@ -16,6 +16,7 @@ from .llm_analysis_service import LLMAnalysisService
 from .message_filters import filter_effective_messages
 from .models import DigestReport, LLMAnalysisConfig, LLMSemanticResult, MemberDigest, MessageRecord
 from .report_cache_store import ReportCacheRecord, ReportCacheStore
+from .semantic_input_builder import SemanticInputBuilder, SemanticInputMaterial
 from .storage import JsonMessageStorage
 
 PeriodType = Literal["yesterday", "today"]
@@ -39,6 +40,12 @@ class ReportBuildMetrics:
     build_path: str = "full_rebuild"
     delta_message_count: int = 0
     incremental_round: int = 0
+    semantic_input_source: str = ""
+    retrieved_topic_slice_count: int = 0
+    current_day_topic_slice_count: int = 0
+    retrieval_enabled: bool = False
+    retrieval_degraded: bool = False
+    retrieval_query_chars: int = 0
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,7 @@ class GroupDigestService:
         template_path: Path,
         report_cache_store: ReportCacheStore | None = None,
         cache_version: int = 1,
+        semantic_input_builder: SemanticInputBuilder | None = None,
     ):
         self.storage = storage
         self.llm_analysis_service = llm_analysis_service
@@ -71,6 +79,7 @@ class GroupDigestService:
         self.report_cache_store = report_cache_store
         self.cache_version = int(cache_version)
         self.incremental_service = IncrementalUpdateService()
+        self.semantic_input_builder = semantic_input_builder or SemanticInputBuilder()
 
     async def generate_digest_text_for_period(
         self,
@@ -201,6 +210,18 @@ class GroupDigestService:
                 ),
             )
 
+        full_window_semantic_material = await self.semantic_input_builder.build_for_full_window(
+            group_id=group_id,
+            date_label=window.date_label,
+            time_window=window.time_window,
+            mode=cache_mode,
+            effective_messages=ordered_effective_messages,
+            max_messages_for_analysis=config.max_messages_for_analysis,
+            context=context,
+            event=event,
+            analysis_provider_id=config.analysis_provider_id,
+        )
+
         expected_provider_id, expected_provider_source, expected_provider_err = await self._resolve_expected_provider_id(
             context=context,
             event=event,
@@ -228,13 +249,14 @@ class GroupDigestService:
                 prompt_signature=prompt_signature,
                 window_start=window.start_ts,
                 use_llm_topic_analysis=config.use_llm_topic_analysis,
+                semantic_material=full_window_semantic_material,
             )
 
             if decision.strategy == "cache_hit" and cache_record is not None:
                 cached_report = self._report_from_payload(cache_record.report)
                 if cached_report is not None:
                     logger.info(
-                        "[group_digest.cache] cache_hit group_id=%s date=%s mode=%s reason=%s effective_message_count=%s effective_last_message_ts=%s effective_last_message_fingerprint=%s provider=%s",
+                        "[group_digest.cache] cache_hit group_id=%s date=%s mode=%s reason=%s effective_message_count=%s effective_last_message_ts=%s effective_last_message_fingerprint=%s provider=%s semantic_source=%s topic_slice_count=%d topic_slice_truncated=%s tail_count=%d",
                         group_id,
                         window.date_label,
                         cache_mode,
@@ -243,6 +265,10 @@ class GroupDigestService:
                         last_message_ts,
                         last_message_fingerprint,
                         expected_provider_id or "-",
+                        full_window_semantic_material.source,
+                        full_window_semantic_material.topic_slice_selected_count,
+                        "true" if full_window_semantic_material.topic_slice_truncated else "false",
+                        full_window_semantic_material.selected_message_count,
                     )
                     return (
                         cached_report,
@@ -253,6 +279,12 @@ class GroupDigestService:
                             build_path="cache_hit",
                             delta_message_count=0,
                             incremental_round=max(0, cache_record.incremental_round),
+                            semantic_input_source=full_window_semantic_material.source,
+                            retrieved_topic_slice_count=full_window_semantic_material.retrieved_topic_slice_count,
+                            current_day_topic_slice_count=full_window_semantic_material.current_day_topic_slice_count,
+                            retrieval_enabled=bool(full_window_semantic_material.retrieval_enabled),
+                            retrieval_degraded=bool(full_window_semantic_material.retrieval_degraded),
+                            retrieval_query_chars=full_window_semantic_material.retrieval_query_chars,
                         ),
                     )
                 logger.warning(
@@ -264,7 +296,7 @@ class GroupDigestService:
                 full_rebuild_reason = "cached_report_invalid"
             elif decision.strategy == "incremental_update" and cache_record is not None:
                 logger.info(
-                    "[group_digest.cache] incremental_update group_id=%s date=%s mode=%s reason=%s delta_message_count=%d effective_message_count=%d incremental_round=%d provider=%s",
+                    "[group_digest.cache] incremental_update group_id=%s date=%s mode=%s reason=%s delta_message_count=%d effective_message_count=%d incremental_round=%d provider=%s semantic_source=%s topic_slice_count=%d topic_slice_truncated=%s tail_count=%d",
                     group_id,
                     window.date_label,
                     cache_mode,
@@ -273,6 +305,10 @@ class GroupDigestService:
                     message_count,
                     decision.incremental_round,
                     expected_provider_id or "-",
+                    full_window_semantic_material.source,
+                    full_window_semantic_material.topic_slice_selected_count,
+                    "true" if full_window_semantic_material.topic_slice_truncated else "false",
+                    full_window_semantic_material.selected_message_count,
                 )
                 try:
                     incremental_result = await self._build_report_with_incremental_update(
@@ -301,7 +337,7 @@ class GroupDigestService:
                     )
                     incremental_result = None
                 if incremental_result is not None:
-                    report, metrics, updated_stats_state, updated_semantic_state = incremental_result
+                    report, metrics, updated_stats_state, updated_semantic_state, incremental_semantic_material = incremental_result
                     if report is not None:
                         await self._write_cache_record(
                             report=report,
@@ -316,6 +352,7 @@ class GroupDigestService:
                             stats_state=updated_stats_state,
                             semantic_state=updated_semantic_state,
                             incremental_round=decision.incremental_round,
+                            semantic_material=incremental_semantic_material,
                         )
                     return report, metrics
 
@@ -325,7 +362,7 @@ class GroupDigestService:
                 full_rebuild_reason = decision.reason
 
             logger.info(
-                "[group_digest.cache] full_rebuild group_id=%s date=%s mode=%s reason=%s delta_message_count=%d effective_message_count=%d incremental_round=%d provider=%s whether_fallback_to_full_rebuild=%s",
+                "[group_digest.cache] full_rebuild group_id=%s date=%s mode=%s reason=%s delta_message_count=%d effective_message_count=%d incremental_round=%d provider=%s whether_fallback_to_full_rebuild=%s semantic_source=%s topic_slice_count=%d topic_slice_truncated=%s tail_count=%d",
                 group_id,
                 window.date_label,
                 cache_mode,
@@ -335,10 +372,14 @@ class GroupDigestService:
                 decision.incremental_round,
                 expected_provider_id or "-",
                 "true" if fallback_from_incremental else "false",
+                full_window_semantic_material.source,
+                full_window_semantic_material.topic_slice_selected_count,
+                "true" if full_window_semantic_material.topic_slice_truncated else "false",
+                full_window_semantic_material.selected_message_count,
             )
         else:
             logger.info(
-                "[group_digest.cache] full_rebuild group_id=%s date=%s mode=%s reason=%s delta_message_count=%d effective_message_count=%d incremental_round=0 provider=%s whether_fallback_to_full_rebuild=false",
+                "[group_digest.cache] full_rebuild group_id=%s date=%s mode=%s reason=%s delta_message_count=%d effective_message_count=%d incremental_round=0 provider=%s whether_fallback_to_full_rebuild=false semantic_source=%s topic_slice_count=%d topic_slice_truncated=%s tail_count=%d",
                 group_id,
                 window.date_label,
                 cache_mode,
@@ -346,6 +387,10 @@ class GroupDigestService:
                 0,
                 message_count,
                 expected_provider_id or "-",
+                full_window_semantic_material.source,
+                full_window_semantic_material.topic_slice_selected_count,
+                "true" if full_window_semantic_material.topic_slice_truncated else "false",
+                full_window_semantic_material.selected_message_count,
             )
 
         report, metrics, rebuilt_stats_state, rebuilt_semantic_state = await self._build_report_without_cache(
@@ -354,6 +399,7 @@ class GroupDigestService:
             group_id=group_id,
             window=window,
             period=period,
+            cache_mode=cache_mode,
             max_active_members=max_active_members,
             max_topics=max_topics,
             analysis_config=config,
@@ -361,6 +407,7 @@ class GroupDigestService:
             expected_provider_source=expected_provider_source,
             effective_messages=ordered_effective_messages,
             load_messages_ms=load_messages_ms,
+            prebuilt_semantic_material=full_window_semantic_material,
         )
 
         if report is not None and self.report_cache_store is not None:
@@ -377,6 +424,7 @@ class GroupDigestService:
                 stats_state=rebuilt_stats_state,
                 semantic_state=rebuilt_semantic_state,
                 incremental_round=0,
+                semantic_material=full_window_semantic_material,
             )
 
         return report, metrics
@@ -389,6 +437,7 @@ class GroupDigestService:
         group_id: str,
         window: ReportWindow,
         period: PeriodType,
+        cache_mode: ReportMode,
         max_active_members: int,
         max_topics: int,
         analysis_config: LLMAnalysisConfig,
@@ -396,6 +445,7 @@ class GroupDigestService:
         expected_provider_source: str,
         effective_messages: list[MessageRecord],
         load_messages_ms: int,
+        prebuilt_semantic_material: SemanticInputMaterial | None = None,
     ) -> tuple[DigestReport | None, ReportBuildMetrics, dict[str, Any], dict[str, Any]]:
         if not effective_messages:
             return (
@@ -421,6 +471,18 @@ class GroupDigestService:
         )
         aggregate_stats_ms = int((perf_counter() - aggregate_start) * 1000)
 
+        semantic_material = prebuilt_semantic_material or await self.semantic_input_builder.build_for_full_window(
+            group_id=group_id,
+            date_label=window.date_label,
+            time_window=window.time_window,
+            mode=cache_mode,
+            effective_messages=effective_messages,
+            max_messages_for_analysis=analysis_config.max_messages_for_analysis,
+            context=context,
+            event=event,
+            analysis_provider_id=analysis_config.analysis_provider_id,
+        )
+
         llm_start = perf_counter()
         outcome = await self.llm_analysis_service.analyze(
             context=context,
@@ -429,11 +491,13 @@ class GroupDigestService:
             group_id=group_id,
             date_label=window.date_label,
             time_window=window.time_window,
-            messages=effective_messages,
+            messages=semantic_material.messages,
             active_members=report.active_members,
             max_topics=max_topics,
             resolved_provider_id=expected_provider_id if expected_provider_id else None,
             resolved_provider_source=expected_provider_source,
+            topic_slice_contexts=semantic_material.topic_slice_contexts,
+            semantic_input_source=semantic_material.source,
         )
         llm_analysis_ms = int((perf_counter() - llm_start) * 1000)
 
@@ -450,6 +514,12 @@ class GroupDigestService:
                 aggregate_stats_ms=aggregate_stats_ms,
                 llm_analysis_ms=llm_analysis_ms,
                 build_path="full_rebuild",
+                semantic_input_source=semantic_material.source,
+                retrieved_topic_slice_count=semantic_material.retrieved_topic_slice_count,
+                current_day_topic_slice_count=semantic_material.current_day_topic_slice_count,
+                retrieval_enabled=bool(semantic_material.retrieval_enabled),
+                retrieval_degraded=bool(semantic_material.retrieval_degraded),
+                retrieval_query_chars=semantic_material.retrieval_query_chars,
             ),
             stats_state,
             semantic_state,
@@ -487,6 +557,7 @@ class GroupDigestService:
         prompt_signature: str,
         window_start: int,
         use_llm_topic_analysis: bool,
+        semantic_material: SemanticInputMaterial,
     ) -> CacheDecision:
         if cache_record is None:
             return CacheDecision(
@@ -535,6 +606,36 @@ class GroupDigestService:
             return CacheDecision(
                 strategy="full_rebuild",
                 reason="provider_changed",
+                delta_messages=[],
+                incremental_round=0,
+            )
+
+        cached_slice_signature = str(cache_record.topic_slice_signature or "").strip()
+        if cached_slice_signature != semantic_material.topic_slice_signature:
+            return CacheDecision(
+                strategy="full_rebuild",
+                reason="topic_slice_signature_changed",
+                delta_messages=[],
+                incremental_round=0,
+            )
+        if int(cache_record.topic_slice_count) != semantic_material.topic_slice_selected_count:
+            return CacheDecision(
+                strategy="full_rebuild",
+                reason="topic_slice_count_changed",
+                delta_messages=[],
+                incremental_round=0,
+            )
+        if int(cache_record.topic_slice_selected_chars) != semantic_material.topic_slice_selected_chars:
+            return CacheDecision(
+                strategy="full_rebuild",
+                reason="topic_slice_chars_changed",
+                delta_messages=[],
+                incremental_round=0,
+            )
+        if bool(cache_record.topic_slice_truncated) != bool(semantic_material.topic_slice_truncated):
+            return CacheDecision(
+                strategy="full_rebuild",
+                reason="topic_slice_truncation_changed",
                 delta_messages=[],
                 incremental_round=0,
             )
@@ -688,7 +789,7 @@ class GroupDigestService:
         delta_messages: list[MessageRecord],
         load_messages_ms: int,
         incremental_round: int,
-    ) -> tuple[DigestReport, ReportBuildMetrics, dict[str, Any], dict[str, Any]] | None:
+    ) -> tuple[DigestReport, ReportBuildMetrics, dict[str, Any], dict[str, Any], SemanticInputMaterial] | None:
         aggregate_start = perf_counter()
         updated_stats_state = self.incremental_service.apply_delta_to_stats_state(
             base_state=cache_record.stats_state,
@@ -713,6 +814,17 @@ class GroupDigestService:
         aggregate_stats_ms = int((perf_counter() - aggregate_start) * 1000)
 
         previous_semantic_state = self._semantic_state_from_cache(cache_record)
+        semantic_material = await self.semantic_input_builder.build_for_incremental(
+            group_id=group_id,
+            date_label=window.date_label,
+            time_window=window.time_window,
+            mode=cache_record.mode,
+            delta_messages=delta_messages,
+            max_messages_for_analysis=analysis_config.max_messages_for_analysis,
+            context=context,
+            event=event,
+            analysis_provider_id=analysis_config.analysis_provider_id,
+        )
         llm_start = perf_counter()
         outcome = await self.llm_analysis_service.analyze_incremental(
             context=context,
@@ -721,12 +833,14 @@ class GroupDigestService:
             group_id=group_id,
             date_label=window.date_label,
             time_window=window.time_window,
-            delta_messages=delta_messages,
+            delta_messages=semantic_material.messages,
             previous_semantic_state=previous_semantic_state,
             updated_stats_state=updated_stats_state,
             max_topics=max_topics,
             resolved_provider_id=expected_provider_id if expected_provider_id else None,
             resolved_provider_source=expected_provider_source,
+            topic_slice_contexts=semantic_material.topic_slice_contexts,
+            semantic_input_source=semantic_material.source,
         )
         llm_analysis_ms = int((perf_counter() - llm_start) * 1000)
 
@@ -755,9 +869,16 @@ class GroupDigestService:
                 build_path="incremental_update",
                 delta_message_count=len(delta_messages),
                 incremental_round=incremental_round,
+                semantic_input_source=semantic_material.source,
+                retrieved_topic_slice_count=semantic_material.retrieved_topic_slice_count,
+                current_day_topic_slice_count=semantic_material.current_day_topic_slice_count,
+                retrieval_enabled=bool(semantic_material.retrieval_enabled),
+                retrieval_degraded=bool(semantic_material.retrieval_degraded),
+                retrieval_query_chars=semantic_material.retrieval_query_chars,
             ),
             updated_stats_state,
             semantic_state,
+            semantic_material,
         )
 
     async def _write_cache_record(
@@ -775,6 +896,7 @@ class GroupDigestService:
         stats_state: dict[str, Any],
         semantic_state: dict[str, Any],
         incremental_round: int,
+        semantic_material: SemanticInputMaterial,
     ) -> None:
         if self.report_cache_store is None:
             return
@@ -801,10 +923,16 @@ class GroupDigestService:
             stats_state=stats_state if isinstance(stats_state, dict) else {},
             semantic_state=semantic_state if isinstance(semantic_state, dict) else {},
             incremental_round=max(0, incremental_round),
+            semantic_input_source=semantic_material.source,
+            topic_slice_signature=semantic_material.topic_slice_signature,
+            topic_slice_count=semantic_material.topic_slice_selected_count,
+            topic_slice_total_chars=semantic_material.topic_slice_total_chars,
+            topic_slice_selected_chars=semantic_material.topic_slice_selected_chars,
+            topic_slice_truncated=bool(semantic_material.topic_slice_truncated),
         )
         await self.report_cache_store.upsert_record(record)
         logger.info(
-            "[group_digest.cache] cache_write group_id=%s date=%s mode=%s source=%s effective_message_count=%s effective_last_message_ts=%s incremental_round=%d",
+            "[group_digest.cache] cache_write group_id=%s date=%s mode=%s source=%s effective_message_count=%s effective_last_message_ts=%s incremental_round=%d semantic_source=%s topic_slice_count=%d topic_slice_truncated=%s tail_count=%d",
             group_id,
             window.date_label,
             cache_mode,
@@ -812,14 +940,23 @@ class GroupDigestService:
             effective_state.message_count,
             effective_state.last_message_ts,
             max(0, incremental_round),
+            semantic_material.source,
+            semantic_material.topic_slice_selected_count,
+            "true" if semantic_material.topic_slice_truncated else "false",
+            semantic_material.selected_message_count,
         )
 
     def _build_prompt_signature(self, *, config: LLMAnalysisConfig, max_topics: int) -> str:
+        semantic_builder_meta = self.semantic_input_builder.describe_extension_point()
         payload = {
             "analysis_prompt_template": config.analysis_prompt_template.strip(),
             "interaction_prompt_template": config.interaction_prompt_template.strip(),
             "use_llm_topic_analysis": config.use_llm_topic_analysis,
             "max_topics": max_topics,
+            "semantic_input_builder": {
+                "topic_slice_contexts_enabled": bool(semantic_builder_meta.get("topic_slice_contexts_enabled", False)),
+                "topic_slice_context_char_guard": int(semantic_builder_meta.get("topic_slice_context_char_guard", 0) or 0),
+            },
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()

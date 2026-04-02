@@ -345,6 +345,17 @@ class ScheduledProactiveService:
             source="scheduler",
         )
 
+        logger.info(
+            "[group_digest.scheduler.semantic] group=%s mode=scheduled semantic_source=%s retrieved_slice_count=%d current_day_slice_count=%d retrieval_enabled=%s retrieval_degraded=%s retrieval_query_chars=%d",
+            record.group_id,
+            metrics.semantic_input_source or "-",
+            metrics.retrieved_topic_slice_count,
+            metrics.current_day_topic_slice_count,
+            "true" if metrics.retrieval_enabled else "false",
+            "true" if metrics.retrieval_degraded else "false",
+            metrics.retrieval_query_chars,
+        )
+
         if report is None:
             result = _GroupProcessResult(
                 group_id=record.group_id,
@@ -361,6 +372,14 @@ class ScheduledProactiveService:
         suggested_reply = ""
         if report.llm_semantic and report.llm_semantic.suggested_bot_reply:
             suggested_reply = report.llm_semantic.suggested_bot_reply.strip()
+
+        logger.info(
+            "[group_digest.scheduler.proactive] group=%s mode=scheduled retrieval_hit=%s suggested_reply_ready=%s suggested_reply_chars=%d",
+            record.group_id,
+            "true" if metrics.retrieved_topic_slice_count > 0 else "false",
+            "true" if bool(suggested_reply) else "false",
+            len(suggested_reply),
+        )
 
         if not suggested_reply:
             result = _GroupProcessResult(

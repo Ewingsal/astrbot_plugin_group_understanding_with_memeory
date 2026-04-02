@@ -48,6 +48,8 @@ class _DigestStub:
                 "group_id": group_id,
                 "umo": getattr(event, "unified_msg_origin", ""),
                 "period": period,
+                "mode": mode,
+                "source": source,
                 "now": now,
                 "max_active_members": max_active_members,
                 "max_topics": max_topics,
@@ -186,6 +188,8 @@ def test_scheduler_sends_per_group_without_cross_mix(tmp_path: Path) -> None:
 
     assert [call["group_id"] for call in digest.calls] == ["group_a", "group_b"]
     assert [call["umo"] for call in digest.calls] == ["umo_a", "umo_b"]
+    assert {call["mode"] for call in digest.calls} == {"scheduled"}
+    assert {call["source"] for call in digest.calls} == {"scheduler"}
 
 
 def test_scheduler_whitelist_only_sends_allowed_groups(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from astrbot_plugin_group_digest.services.interaction_service import Interaction
 from astrbot_plugin_group_digest.services.llm_analysis_service import LLMAnalysisService
 from astrbot_plugin_group_digest.services.models import LLMAnalysisConfig, MessageRecord
 from astrbot_plugin_group_digest.services.report_cache_store import ReportCacheStore
+from astrbot_plugin_group_digest.services.semantic_input_builder import SemanticInputBuilder
 from astrbot_plugin_group_digest.services.storage import JsonMessageStorage
 
 
@@ -34,6 +35,18 @@ class _StubContext:
         if not self.responses:
             raise RuntimeError("no mock llm response")
         return _Resp(self.responses.pop(0))
+
+
+class _MutableSliceTopicManager:
+    def __init__(self, contexts: list[str] | None = None):
+        self.contexts = list(contexts or [])
+
+    def set_contexts(self, contexts: list[str]) -> None:
+        self.contexts = list(contexts)
+
+    def collect_slice_contexts(self, **kwargs):
+        _ = kwargs
+        return list(self.contexts)
 
 
 def _valid_unified_json(reply: str = "大家要不要把今天的重点结论整理成三条？") -> str:
@@ -71,6 +84,29 @@ def _build_service(tmp_path: Path) -> tuple[GroupDigestService, JsonMessageStora
         template_path=template_path,
         report_cache_store=cache_store,
         cache_version=1,
+    )
+    return service, storage, cache_store
+
+
+def _build_service_with_topic_manager(
+    tmp_path: Path,
+    *,
+    topic_manager: object,
+) -> tuple[GroupDigestService, JsonMessageStorage, ReportCacheStore]:
+    storage = JsonMessageStorage(tmp_path / "messages.json")
+    cache_store = ReportCacheStore(tmp_path / "report_cache.json", cache_version=1)
+    template_path = Path(__file__).resolve().parents[1] / "templates" / "daily_digest.md.j2"
+    service = GroupDigestService(
+        storage=storage,
+        llm_analysis_service=LLMAnalysisService(),
+        interaction_service=InteractionService(),
+        template_path=template_path,
+        report_cache_store=cache_store,
+        cache_version=1,
+        semantic_input_builder=SemanticInputBuilder(
+            topic_segment_manager=topic_manager,  # type: ignore[arg-type]
+            enable_topic_slice_contexts=True,
+        ),
     )
     return service, storage, cache_store
 
@@ -387,6 +423,64 @@ def test_provider_or_max_messages_change_invalidates_cache(tmp_path: Path) -> No
     )
 
     assert context.llm_calls == 2
+
+
+def test_topic_slice_change_invalidates_cache_without_new_effective_messages(tmp_path: Path) -> None:
+    manager = _MutableSliceTopicManager(["slice_context_a"])
+    service, storage, _cache = _build_service_with_topic_manager(tmp_path, topic_manager=manager)
+    _append(
+        storage,
+        MessageRecord("group_1001", "u1", "Alice", "固定消息", int(datetime(2026, 3, 22, 10, 0, 0).timestamp())),
+    )
+
+    first_context = _StubContext(responses=[_valid_unified_json("第一次")])
+    _run(
+        service.build_report_for_period_with_metrics(
+            context=first_context,
+            event=_event(),
+            group_id="group_1001",
+            now=datetime(2026, 3, 22, 12, 0, 0),
+            period="today",
+            mode="today",
+            source="command_group_digest_today",
+            analysis_config=_base_config(),
+        )
+    )
+    assert first_context.llm_calls == 1
+
+    hit_context = _StubContext(responses=[])
+    _hit_report, hit_metrics = _run(
+        service.build_report_for_period_with_metrics(
+            context=hit_context,
+            event=_event(),
+            group_id="group_1001",
+            now=datetime(2026, 3, 22, 12, 5, 0),
+            period="today",
+            mode="today",
+            source="command_group_digest_today",
+            analysis_config=_base_config(),
+        )
+    )
+    assert hit_metrics.build_path == "cache_hit"
+    assert hit_context.llm_calls == 0
+
+    manager.set_contexts(["slice_context_b"])
+    changed_context = _StubContext(responses=[_valid_unified_json("slice变化后重算")])
+    _changed_report, changed_metrics = _run(
+        service.build_report_for_period_with_metrics(
+            context=changed_context,
+            event=_event(),
+            group_id="group_1001",
+            now=datetime(2026, 3, 22, 12, 10, 0),
+            period="today",
+            mode="today",
+            source="command_group_digest_today",
+            analysis_config=_base_config(),
+        )
+    )
+
+    assert changed_metrics.build_path == "full_rebuild"
+    assert changed_context.llm_calls == 1
 
 
 def test_scheduler_source_writes_cache(tmp_path: Path) -> None:

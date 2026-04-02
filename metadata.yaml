@@ -1,6 +1,6 @@
-name: astrbot_plugin_group_digest
-display_name: 群聊兴趣日报
-desc: 基于 AstrBot 实现群聊消息总结、群热门话题分析、成员兴趣摘要与日报生成、通过LLM 建议astrbot定时主动发言。
-version: 0.6.0
+name: astrbot_plugin_group_understanding_with_memeory
+display_name: 群聊深度理解与记忆增强插件
+desc: 围绕群聊事实归档、话题切片、语义输入增强、增量更新与可复用记忆，形成一条可持续运行的群聊理解链路，实现群聊理解、历史记忆、黑话学习等功能
+version: 0.7.0
 author: Ewingsal
-repo: https://github.com/Ewingsal/astrbot_plugin_group_digest
+repo: https://github.com/Ewingsal/astrbot_plugin_group_understanding_with_memory

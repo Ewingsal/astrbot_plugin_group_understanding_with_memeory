@@ -35,6 +35,12 @@ class ReportCacheRecord:
     stats_state: dict[str, Any] = field(default_factory=dict)
     semantic_state: dict[str, Any] = field(default_factory=dict)
     incremental_round: int = 0
+    semantic_input_source: str = ""
+    topic_slice_signature: str = ""
+    topic_slice_count: int = 0
+    topic_slice_total_chars: int = 0
+    topic_slice_selected_chars: int = 0
+    topic_slice_truncated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -102,6 +108,27 @@ class ReportCacheRecord:
             stats_state=stats_state,
             semantic_state=semantic_state,
             incremental_round=cls._safe_int(data.get("incremental_round", 0), field="incremental_round"),
+            semantic_input_source=str(data.get("semantic_input_source", "")).strip(),
+            topic_slice_signature=str(data.get("topic_slice_signature", "")).strip(),
+            topic_slice_count=max(0, cls._safe_int(data.get("topic_slice_count", 0), field="topic_slice_count")),
+            topic_slice_total_chars=max(
+                0,
+                cls._safe_int(
+                    data.get("topic_slice_total_chars", 0),
+                    field="topic_slice_total_chars",
+                ),
+            ),
+            topic_slice_selected_chars=max(
+                0,
+                cls._safe_int(
+                    data.get("topic_slice_selected_chars", 0),
+                    field="topic_slice_selected_chars",
+                ),
+            ),
+            topic_slice_truncated=cls._safe_bool(
+                data.get("topic_slice_truncated", False),
+                field="topic_slice_truncated",
+            ),
         )
 
     @staticmethod
@@ -116,6 +143,26 @@ class ReportCacheRecord:
                 default,
             )
             return default
+
+    @staticmethod
+    def _safe_bool(value: object, *, field: str, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "n", "off"}:
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        logger.warning(
+            "[group_digest.cache_store] invalid_bool field=%s value=%r fallback=%s",
+            field,
+            value,
+            "true" if default else "false",
+        )
+        return default
 
 
 class ReportCacheStore:
