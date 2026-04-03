@@ -383,10 +383,16 @@ class GroupDigestPlugin(Star):
                 self._conf_get("qdrant_semantic_unit_collection", "group_digest_semantic_units")
             ).strip()
             or "group_digest_semantic_units",
-            topic_slice_collection=str(
-                self._conf_get("qdrant_topic_slice_collection", "group_digest_topic_slices")
+            topic_head_collection=str(
+                self._conf_get(
+                    "qdrant_topic_head_collection",
+                    self._conf_get("qdrant_topic_slice_collection", "group_digest_topic_heads"),
+                )
             ).strip()
-            or "group_digest_topic_slices",
+            or "group_digest_topic_heads",
+            topic_slice_collection=str(
+                self._conf_get("qdrant_topic_slice_collection", "")
+            ).strip(),
             vector_size=self._conf_int("qdrant_vector_size", 1536, lower=1),
             distance_metric=str(self._conf_get("qdrant_distance_metric", "cosine")).strip(),
             prefer_grpc=self._as_bool(self._conf_get("qdrant_prefer_grpc", False), False),

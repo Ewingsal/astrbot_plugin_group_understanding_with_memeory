@@ -147,3 +147,39 @@ def test_qdrant_store_minimal_query_hook() -> None:
     assert search_call["body"]["filter"]["must"][0]["key"] == "object_type"
     assert search_call["body"]["filter"]["must"][0]["match"]["value"] == "topic_slice"
     assert search_call["body"]["filter"]["must"][1]["key"] == "group_id"
+
+
+def test_qdrant_store_topic_head_query_uses_topic_head_object_type() -> None:
+    store = QdrantEmbeddingStore(
+        enabled=True,
+        qdrant_url="http://qdrant.local:6333",
+        semantic_unit_collection="su_col",
+        topic_head_collection="th_col",
+        vector_size=2,
+    )
+
+    calls: list[dict] = []
+
+    async def _fake_request_json(*, method, path, body, allowed_statuses):
+        calls.append({"method": method, "path": path, "body": body, "allowed_statuses": allowed_statuses})
+        if method == "GET" and path.startswith("/collections/"):
+            return 200, {"status": "ok"}
+        if path.endswith("/points/search"):
+            return 200, {"result": [{"payload": {"group_id": "group_1001", "object_type": "topic_head"}}]}
+        return 200, {"status": "ok"}
+
+    store._request_json = _fake_request_json  # type: ignore[method-assign]
+
+    rows = _run(
+        store.query_topic_heads(
+            group_id="group_1001",
+            query_vector=[0.1, 0.2],
+            recent_days=2,
+            limit=3,
+        )
+    )
+
+    assert rows == [{"group_id": "group_1001", "object_type": "topic_head"}]
+    search_call = next(item for item in calls if item["path"].endswith("/points/search"))
+    assert search_call["body"]["filter"]["must"][0]["key"] == "object_type"
+    assert search_call["body"]["filter"]["must"][0]["match"]["value"] == "topic_head"

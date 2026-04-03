@@ -198,6 +198,63 @@ class _FailingEmbeddingStore:
         raise RuntimeError("store unavailable")
 
 
+class _TwoLayerEmbeddingStore:
+    def __init__(self):
+        self.head_calls: list[dict] = []
+        self.unit_calls: list[dict] = []
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    async def upsert_semantic_unit(self, doc):
+        _ = doc
+        return True
+
+    async def upsert_topic_head(self, doc):
+        _ = doc
+        return True
+
+    async def upsert_topic_slice(self, doc):
+        _ = doc
+        return True
+
+    async def query_topic_heads(self, **kwargs):
+        self.head_calls.append(dict(kwargs))
+        return [
+            {
+                "object_type": "topic_head",
+                "group_id": kwargs.get("group_id", ""),
+                "date_label": "2026-03-21",
+                "topic_id": "20260321_0001",
+                "start_ts": int(datetime(2026, 3, 21, 20, 0, 0).timestamp()),
+                "end_ts": int(datetime(2026, 3, 21, 20, 30, 0).timestamp()),
+                "message_count": 6,
+                "participants": ["Alice(u1)"],
+                "head_text": "历史话题头：部署窗口和回滚策略",
+            }
+        ]
+
+    async def query_topic_slices(self, **kwargs):
+        self.head_calls.append(dict(kwargs))
+        return []
+
+    async def query_semantic_units(self, **kwargs):
+        self.unit_calls.append(dict(kwargs))
+        return [
+            {
+                "object_type": "semantic_unit",
+                "group_id": kwargs.get("group_id", ""),
+                "date_label": "2026-03-21",
+                "topic_id": kwargs.get("topic_id", ""),
+                "semantic_unit_id": "unit_demo_1",
+                "start_ts": int(datetime(2026, 3, 21, 20, 5, 0).timestamp()),
+                "end_ts": int(datetime(2026, 3, 21, 20, 8, 0).timestamp()),
+                "text": "部署窗口和回滚路径需要同步确认",
+            }
+        ]
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -572,3 +629,48 @@ def test_semantic_input_builder_scheduled_mode_falls_back_when_no_retrieval_hits
     assert material.current_day_topic_slice_count == 1
     assert material.retrieval_query_mode in {"scheduled_topic_plus_tail", "scheduled_tail_only"}
     assert material.source == "topic_slices_plus_tail_raw_messages"
+
+
+def test_semantic_input_builder_uses_two_layer_head_and_unit_retrieval() -> None:
+    embedding_store = _TwoLayerEmbeddingStore()
+    builder = SemanticInputBuilder(
+        topic_segment_manager=_EmptyTopicManager(),  # type: ignore[arg-type]
+        embedding_backend=_StubEmbeddingBackend(),  # type: ignore[arg-type]
+        embedding_store=embedding_store,  # type: ignore[arg-type]
+        enable_topic_slice_retrieval=True,
+        topic_slice_retrieval_query_message_count=2,
+        semantic_unit_retrieval_per_head=2,
+    )
+    material = _run(
+        builder.build_for_full_window(
+            group_id="group_1001",
+            date_label="2026-03-22",
+            time_window="2026-03-22 00:00 - 2026-03-22 23:59",
+            mode="today",
+            effective_messages=[
+                MessageRecord(
+                    "group_1001",
+                    "u1",
+                    "Alice",
+                    "今晚继续确认部署窗口",
+                    int(datetime(2026, 3, 22, 20, 0, 0).timestamp()),
+                ),
+                MessageRecord(
+                    "group_1001",
+                    "u2",
+                    "Bob",
+                    "回滚预案也要一起过一下",
+                    int(datetime(2026, 3, 22, 20, 1, 0).timestamp()),
+                ),
+            ],
+            max_messages_for_analysis=5,
+        )
+    )
+
+    assert embedding_store.head_calls
+    assert embedding_store.unit_calls
+    assert embedding_store.unit_calls[0]["topic_id"] == "20260321_0001"
+    assert material.retrieved_topic_head_count == 1
+    assert material.retrieved_semantic_unit_count == 1
+    assert any("retrieved_topic_head_id=20260321_0001" in row for row in material.topic_slice_contexts)
+    assert any("retrieved_semantic_unit_id=unit_demo_1" in row for row in material.topic_slice_contexts)

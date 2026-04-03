@@ -217,14 +217,25 @@ class SlangInterpretationService:
         start_ts = day_start_ts - self.slang_retrieval_recent_days * 24 * 60 * 60
         end_ts = day_start_ts + 24 * 60 * 60
         try:
-            rows = await self.embedding_store.query_topic_slices(
-                group_id=group_id,
-                query_vector=[float(item) for item in vector],
-                start_ts=start_ts,
-                end_ts=end_ts,
-                recent_days=self.slang_retrieval_recent_days,
-                limit=self.slang_retrieval_limit,
-            )
+            query_topic_heads = getattr(self.embedding_store, "query_topic_heads", None)
+            if callable(query_topic_heads):
+                rows = await query_topic_heads(
+                    group_id=group_id,
+                    query_vector=[float(item) for item in vector],
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    recent_days=self.slang_retrieval_recent_days,
+                    limit=self.slang_retrieval_limit,
+                )
+            else:
+                rows = await self.embedding_store.query_topic_slices(
+                    group_id=group_id,
+                    query_vector=[float(item) for item in vector],
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    recent_days=self.slang_retrieval_recent_days,
+                    limit=self.slang_retrieval_limit,
+                )
         except Exception as exc:
             logger.warning(
                 "[group_digest.slang] candidate_retrieval_failed group_id=%s term=%s error=%s",
@@ -240,18 +251,24 @@ class SlangInterpretationService:
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            object_type = str(row.get("object_type", "")).strip()
+            if object_type not in {"", "topic_head", "topic_slice"}:
+                continue
             topic_id = str(row.get("topic_id", "")).strip()
             row_date = str(row.get("date_label", "")).strip()
-            core_text = str(row.get("core_text", "")).strip()
-            if not topic_id or not core_text:
+            head_text = (
+                str(row.get("head_text", "")).strip()
+                or str(row.get("core_text", "")).strip()
+            )
+            if not topic_id or not head_text:
                 continue
-            if len(core_text) > 180:
-                core_text = f"{core_text[:180]}..."
+            if len(head_text) > 180:
+                head_text = f"{head_text[:180]}..."
             sid = f"{row_date}:{topic_id}" if row_date else topic_id
             if sid not in seen_slice_ids:
                 source_slice_ids.append(sid)
                 seen_slice_ids.add(sid)
-            contexts.append(core_text)
+            contexts.append(head_text)
 
         logger.info(
             "[group_digest.slang] candidate_retrieval group_id=%s term=%s query_chars=%d context_count=%d",
@@ -427,4 +444,3 @@ class SlangInterpretationService:
             return float(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return default
-

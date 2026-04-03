@@ -52,76 +52,123 @@ class MessageRecord:
 
 
 @dataclass
-class TopicSliceRecord:
+class TopicHeadRecord:
     group_id: str
     date_label: str
     topic_id: str
     start_ts: int
     end_ts: int
     message_count: int
+    effective_message_count: int = 0
     participants: list[str] = field(default_factory=list)
     recent_keywords: list[str] = field(default_factory=list)
+    message_ids: list[str] = field(default_factory=list)
+    semantic_unit_ids: list[str] = field(default_factory=list)
     first_message_id: str = ""
     last_message_id: str = ""
+    head_text: str = ""
     core_text: str = ""
-    core_message_ids: list[str] = field(default_factory=list)
-    message_ids: list[str] = field(default_factory=list)
-    effective_message_count: int = 0
+    head_embedding: list[float] = field(default_factory=list)
     semantic_unit_count: int = 0
+    head_embedding_model: str = ""
+    head_embedding_version: str = ""
     core_embedding_model: str = ""
     core_embedding_version: str = ""
 
+    def __post_init__(self) -> None:
+        if not self.head_text and self.core_text:
+            self.head_text = str(self.core_text)
+        elif not self.core_text and self.head_text:
+            self.core_text = str(self.head_text)
+
+        if not self.head_embedding_model and self.core_embedding_model:
+            self.head_embedding_model = str(self.core_embedding_model)
+        elif not self.core_embedding_model and self.head_embedding_model:
+            self.core_embedding_model = str(self.head_embedding_model)
+
+        if not self.head_embedding_version and self.core_embedding_version:
+            self.head_embedding_version = str(self.core_embedding_version)
+        elif not self.core_embedding_version and self.head_embedding_version:
+            self.core_embedding_version = str(self.head_embedding_version)
+
+        if self.semantic_unit_count <= 0 and self.semantic_unit_ids:
+            self.semantic_unit_count = len(self.semantic_unit_ids)
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # 兼容旧字段，便于平滑迁移。
+        payload["head_text"] = self.head_text or self.core_text
+        payload["core_text"] = self.core_text or self.head_text
+        payload["head_embedding_model"] = self.head_embedding_model or self.core_embedding_model
+        payload["head_embedding_version"] = self.head_embedding_version or self.core_embedding_version
+        payload["core_embedding_model"] = self.core_embedding_model or self.head_embedding_model
+        payload["core_embedding_version"] = self.core_embedding_version or self.head_embedding_version
+        payload["semantic_unit_count"] = (
+            int(self.semantic_unit_count)
+            if int(self.semantic_unit_count) > 0
+            else len(self.semantic_unit_ids)
+        )
+        return payload
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "TopicSliceRecord | None":
+    def from_dict(cls, data: dict[str, Any]) -> "TopicHeadRecord | None":
         if not isinstance(data, dict):
             logger.warning(
-                "[group_digest.model] invalid_topic_slice_type expected=dict got=%s",
+                "[group_digest.model] invalid_topic_head_type expected=dict got=%s",
                 type(data).__name__,
             )
             return None
 
         participants = cls._normalize_string_list(data.get("participants", []))
         recent_keywords = cls._normalize_string_list(data.get("recent_keywords", []))
-        core_message_ids = cls._normalize_string_list(data.get("core_message_ids", []))
         message_ids = cls._normalize_string_list(data.get("message_ids", []))
+        semantic_unit_ids = cls._normalize_string_list(data.get("semantic_unit_ids", []))
         message_count = max(
             0,
-            cls._safe_int(data.get("message_count", 0), field="topic_slice.message_count"),
+            cls._safe_int(data.get("message_count", 0), field="topic_head.message_count"),
         )
         effective_message_count = max(
             0,
             cls._safe_int(
                 data.get("effective_message_count", message_count),
-                field="topic_slice.effective_message_count",
+                field="topic_head.effective_message_count",
+            ),
+        )
+        head_text = str(data.get("head_text", "")).strip() or str(data.get("core_text", "")).strip()
+        head_embedding = cls._normalize_float_list(data.get("head_embedding", []))
+        semantic_unit_count = max(
+            0,
+            cls._safe_int(
+                data.get("semantic_unit_count", len(semantic_unit_ids)),
+                field="topic_head.semantic_unit_count",
             ),
         )
         return cls(
             group_id=str(data.get("group_id", "")).strip(),
             date_label=str(data.get("date_label", "")).strip(),
             topic_id=str(data.get("topic_id", "")).strip(),
-            start_ts=cls._safe_int(data.get("start_ts", 0), field="topic_slice.start_ts"),
-            end_ts=cls._safe_int(data.get("end_ts", 0), field="topic_slice.end_ts"),
+            start_ts=cls._safe_int(data.get("start_ts", 0), field="topic_head.start_ts"),
+            end_ts=cls._safe_int(data.get("end_ts", 0), field="topic_head.end_ts"),
             message_count=message_count,
+            effective_message_count=effective_message_count,
             participants=participants,
             recent_keywords=recent_keywords,
+            message_ids=message_ids,
+            semantic_unit_ids=semantic_unit_ids,
             first_message_id=str(data.get("first_message_id", "")).strip(),
             last_message_id=str(data.get("last_message_id", "")).strip(),
-            core_text=str(data.get("core_text", "")).strip(),
-            core_message_ids=core_message_ids,
-            message_ids=message_ids,
-            effective_message_count=effective_message_count,
-            semantic_unit_count=max(
-                0,
-                cls._safe_int(
-                    data.get("semantic_unit_count", 0),
-                    field="topic_slice.semantic_unit_count",
-                ),
-            ),
-            core_embedding_model=str(data.get("core_embedding_model", "")).strip(),
-            core_embedding_version=str(data.get("core_embedding_version", "")).strip(),
+            head_text=head_text,
+            core_text=head_text,
+            head_embedding=head_embedding,
+            semantic_unit_count=semantic_unit_count,
+            head_embedding_model=str(data.get("head_embedding_model", "")).strip()
+            or str(data.get("core_embedding_model", "")).strip(),
+            head_embedding_version=str(data.get("head_embedding_version", "")).strip()
+            or str(data.get("core_embedding_version", "")).strip(),
+            core_embedding_model=str(data.get("core_embedding_model", "")).strip()
+            or str(data.get("head_embedding_model", "")).strip(),
+            core_embedding_version=str(data.get("core_embedding_version", "")).strip()
+            or str(data.get("head_embedding_version", "")).strip(),
         )
 
     @staticmethod
@@ -138,6 +185,18 @@ class TopicSliceRecord:
             return default
 
     @staticmethod
+    def _normalize_float_list(value: object) -> list[float]:
+        if not isinstance(value, list):
+            return []
+        result: list[float] = []
+        for item in value:
+            try:
+                result.append(float(item))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    @staticmethod
     def _normalize_string_list(value: object) -> list[str]:
         if not isinstance(value, list):
             return []
@@ -147,6 +206,10 @@ class TopicSliceRecord:
             if text:
                 result.append(text)
         return result
+
+@dataclass
+class TopicSliceRecord(TopicHeadRecord):
+    """兼容旧命名：TopicSliceRecord 等同于 TopicHeadRecord。"""
 
 
 @dataclass
@@ -264,7 +327,26 @@ class SemanticUnitRecord:
     embedding_version: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["semantic_unit_id"] = self.unit_id
+        payload["unit_text"] = self.text
+        return payload
+
+    @property
+    def semantic_unit_id(self) -> str:
+        return self.unit_id
+
+    @semantic_unit_id.setter
+    def semantic_unit_id(self, value: str) -> None:
+        self.unit_id = str(value or "").strip()
+
+    @property
+    def unit_text(self) -> str:
+        return self.text
+
+    @unit_text.setter
+    def unit_text(self, value: str) -> None:
+        self.text = str(value or "")
 
 
 @dataclass
@@ -328,6 +410,7 @@ class GroupDayTopicRuntimeState:
     date_label: str
     next_topic_index: int = 1
     topics: dict[str, RuntimeTopic] = field(default_factory=dict)
+    semantic_units: dict[str, SemanticUnitRecord] = field(default_factory=dict)
     current_topic_id: str = ""
     pending_effective_messages: list[MessageRecord] = field(default_factory=list)
     transfer_buffer: TransferBufferState = field(default_factory=TransferBufferState)

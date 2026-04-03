@@ -38,6 +38,9 @@ class SemanticInputMaterial:
     topic_slice_signature: str = ""
     retrieved_topic_slice_count: int = 0
     current_day_topic_slice_count: int = 0
+    retrieved_topic_head_count: int = 0
+    retrieved_semantic_unit_count: int = 0
+    current_day_topic_head_count: int = 0
     retrieval_enabled: bool = False
     retrieval_degraded: bool = False
     retrieval_query_chars: int = 0
@@ -60,6 +63,7 @@ class SemanticInputBuilder:
     DEFAULT_TOPIC_SLICE_RETRIEVAL_RECENT_DAYS = 3
     DEFAULT_TOPIC_SLICE_RETRIEVAL_LIMIT = 5
     DEFAULT_TOPIC_SLICE_RETRIEVAL_QUERY_MESSAGE_COUNT = 8
+    DEFAULT_SEMANTIC_UNIT_RETRIEVAL_PER_HEAD = 2
     DEFAULT_MAX_SLANG_CONTEXT_CHARS = 1200
     DEFAULT_SLANG_INJECTION_LIMIT = 5
     DEFAULT_SLANG_RECENT_DAYS = 7
@@ -76,6 +80,7 @@ class SemanticInputBuilder:
         topic_slice_retrieval_recent_days: int = DEFAULT_TOPIC_SLICE_RETRIEVAL_RECENT_DAYS,
         topic_slice_retrieval_limit: int = DEFAULT_TOPIC_SLICE_RETRIEVAL_LIMIT,
         topic_slice_retrieval_query_message_count: int = DEFAULT_TOPIC_SLICE_RETRIEVAL_QUERY_MESSAGE_COUNT,
+        semantic_unit_retrieval_per_head: int = DEFAULT_SEMANTIC_UNIT_RETRIEVAL_PER_HEAD,
         topic_slice_store: TopicSliceStore | None = None,
         slang_store: SlangStore | None = None,
         slang_candidate_miner: SlangCandidateMiner | None = None,
@@ -94,6 +99,7 @@ class SemanticInputBuilder:
         self.topic_slice_retrieval_recent_days = max(1, int(topic_slice_retrieval_recent_days))
         self.topic_slice_retrieval_limit = max(1, int(topic_slice_retrieval_limit))
         self.topic_slice_retrieval_query_message_count = max(1, int(topic_slice_retrieval_query_message_count))
+        self.semantic_unit_retrieval_per_head = max(1, int(semantic_unit_retrieval_per_head))
         self.topic_slice_store = topic_slice_store
         self.slang_store = slang_store
         self.slang_candidate_miner = slang_candidate_miner
@@ -174,8 +180,11 @@ class SemanticInputBuilder:
             topic_slice_selected_chars=current_day_guard["selected_chars"],
             topic_slice_truncated=current_day_guard["truncated"],
             topic_slice_signature=self._build_topic_slice_signature(all_contexts),
-            retrieved_topic_slice_count=len(retrieved_slice_contexts),
+            retrieved_topic_slice_count=int(retrieval_meta.get("head_count", 0)),
             current_day_topic_slice_count=len(current_day_slice_contexts),
+            retrieved_topic_head_count=int(retrieval_meta.get("head_count", 0)),
+            retrieved_semantic_unit_count=int(retrieval_meta.get("unit_count", 0)),
+            current_day_topic_head_count=len(current_day_slice_contexts),
             retrieval_enabled=retrieval_meta["enabled"],
             retrieval_degraded=retrieval_meta["degraded"],
             retrieval_query_chars=retrieval_meta["query_chars"],
@@ -269,8 +278,11 @@ class SemanticInputBuilder:
             topic_slice_selected_chars=current_day_guard["selected_chars"],
             topic_slice_truncated=current_day_guard["truncated"],
             topic_slice_signature=self._build_topic_slice_signature(all_contexts),
-            retrieved_topic_slice_count=len(retrieved_slice_contexts),
+            retrieved_topic_slice_count=int(retrieval_meta.get("head_count", 0)),
             current_day_topic_slice_count=len(current_day_slice_contexts),
+            retrieved_topic_head_count=int(retrieval_meta.get("head_count", 0)),
+            retrieved_semantic_unit_count=int(retrieval_meta.get("unit_count", 0)),
+            current_day_topic_head_count=len(current_day_slice_contexts),
             retrieval_enabled=retrieval_meta["enabled"],
             retrieval_degraded=retrieval_meta["degraded"],
             retrieval_query_chars=retrieval_meta["query_chars"],
@@ -309,6 +321,8 @@ class SemanticInputBuilder:
                 "tail_count": 0,
                 "topic_hint_count": 0,
                 "query_mode": "",
+                "head_count": 0,
+                "unit_count": 0,
             }
 
         query_payload = self._build_retrieval_query_payload(
@@ -331,10 +345,12 @@ class SemanticInputBuilder:
                 "tail_count": tail_count,
                 "topic_hint_count": topic_hint_count,
                 "query_mode": query_mode,
+                "head_count": 0,
+                "unit_count": 0,
             }
 
         logger.info(
-            "[group_digest.semantic_input] topic_slice_retrieval_query_built group_id=%s mode=%s query_mode=%s query_chars=%d tail_count=%d topic_hint_count=%d query_preview=%s",
+            "[group_digest.semantic_input] topic_head_retrieval_query_built group_id=%s mode=%s query_mode=%s query_chars=%d tail_count=%d topic_hint_count=%d query_preview=%s",
             group_id,
             mode,
             query_mode,
@@ -346,7 +362,7 @@ class SemanticInputBuilder:
 
         if not self.embedding_store.enabled:
             logger.info(
-                "[group_digest.semantic_input] topic_slice_retrieval_noop group_id=%s mode=%s reason=embedding_store_disabled",
+                "[group_digest.semantic_input] topic_head_retrieval_noop group_id=%s mode=%s reason=embedding_store_disabled",
                 group_id,
                 mode,
             )
@@ -357,13 +373,15 @@ class SemanticInputBuilder:
                 "tail_count": tail_count,
                 "topic_hint_count": topic_hint_count,
                 "query_mode": query_mode,
+                "head_count": 0,
+                "unit_count": 0,
             }
 
         try:
             vector = await self.embedding_backend.embed_text(query_text)
         except Exception as exc:
             logger.warning(
-                "[group_digest.semantic_input] topic_slice_retrieval_embed_failed group_id=%s mode=%s error=%s",
+                "[group_digest.semantic_input] topic_head_retrieval_embed_failed group_id=%s mode=%s error=%s",
                 group_id,
                 mode,
                 exc,
@@ -375,11 +393,13 @@ class SemanticInputBuilder:
                 "tail_count": tail_count,
                 "topic_hint_count": topic_hint_count,
                 "query_mode": query_mode,
+                "head_count": 0,
+                "unit_count": 0,
             }
 
         if not vector:
             logger.info(
-                "[group_digest.semantic_input] topic_slice_retrieval_noop group_id=%s mode=%s reason=empty_query_embedding",
+                "[group_digest.semantic_input] topic_head_retrieval_noop group_id=%s mode=%s reason=empty_query_embedding",
                 group_id,
                 mode,
             )
@@ -390,23 +410,36 @@ class SemanticInputBuilder:
                 "tail_count": tail_count,
                 "topic_hint_count": topic_hint_count,
                 "query_mode": query_mode,
+                "head_count": 0,
+                "unit_count": 0,
             }
 
         day_start_ts = self._resolve_day_start_ts(date_label=date_label)
         start_ts = day_start_ts - self.topic_slice_retrieval_recent_days * 24 * 60 * 60
         end_ts = day_start_ts
         try:
-            rows = await self.embedding_store.query_topic_slices(
-                group_id=group_id,
-                query_vector=[float(item) for item in vector],
-                start_ts=start_ts,
-                end_ts=end_ts,
-                recent_days=self.topic_slice_retrieval_recent_days,
-                limit=self.topic_slice_retrieval_limit,
-            )
+            query_topic_heads = getattr(self.embedding_store, "query_topic_heads", None)
+            if callable(query_topic_heads):
+                head_rows = await query_topic_heads(
+                    group_id=group_id,
+                    query_vector=[float(item) for item in vector],
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    recent_days=self.topic_slice_retrieval_recent_days,
+                    limit=self.topic_slice_retrieval_limit,
+                )
+            else:
+                head_rows = await self.embedding_store.query_topic_slices(
+                    group_id=group_id,
+                    query_vector=[float(item) for item in vector],
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    recent_days=self.topic_slice_retrieval_recent_days,
+                    limit=self.topic_slice_retrieval_limit,
+                )
         except Exception as exc:
             logger.warning(
-                "[group_digest.semantic_input] topic_slice_retrieval_query_failed group_id=%s mode=%s error=%s",
+                "[group_digest.semantic_input] topic_head_retrieval_query_failed group_id=%s mode=%s error=%s",
                 group_id,
                 mode,
                 exc,
@@ -418,25 +451,75 @@ class SemanticInputBuilder:
                 "tail_count": tail_count,
                 "topic_hint_count": topic_hint_count,
                 "query_mode": query_mode,
+                "head_count": 0,
+                "unit_count": 0,
             }
 
-        contexts: list[str] = []
-        for row in rows:
-            context = self._format_retrieved_slice_context(row)
+        head_contexts: list[str] = []
+        hit_topic_ids: list[str] = []
+        for row in head_rows:
+            topic_id = str(row.get("topic_id", "")).strip() if isinstance(row, dict) else ""
+            if not topic_id:
+                continue
+            context = self._format_retrieved_head_context(row)
             if context:
-                contexts.append(context)
+                head_contexts.append(context)
+                hit_topic_ids.append(topic_id)
+
+        unit_contexts: list[str] = []
+        unit_count = 0
+        for topic_id in hit_topic_ids:
+            try:
+                unit_rows = await self.embedding_store.query_semantic_units(
+                    group_id=group_id,
+                    topic_id=topic_id,
+                    query_vector=[float(item) for item in vector],
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    recent_days=self.topic_slice_retrieval_recent_days,
+                    limit=self.semantic_unit_retrieval_per_head,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[group_digest.semantic_input] semantic_unit_retrieval_query_failed group_id=%s mode=%s topic_id=%s error=%s",
+                    group_id,
+                    mode,
+                    topic_id,
+                    exc,
+                )
+                continue
+
+            for row in unit_rows:
+                context = self._format_retrieved_unit_context(row)
+                if context:
+                    unit_contexts.append(context)
+                    unit_count += 1
+
+        contexts: list[str] = []
+        seen: set[str] = set()
+        for text in head_contexts + unit_contexts:
+            normalized = str(text).strip()
+            if not normalized:
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            contexts.append(normalized)
 
         logger.info(
-            "[group_digest.semantic_input] topic_slice_retrieval group_id=%s mode=%s query_mode=%s query_chars=%d tail_count=%d topic_hint_count=%d results=%d recent_days=%d limit=%d",
+            "[group_digest.semantic_input] topic_head_unit_retrieval group_id=%s mode=%s query_mode=%s query_chars=%d tail_count=%d topic_hint_count=%d head_hits=%d unit_hits=%d results=%d recent_days=%d head_limit=%d unit_per_head=%d",
             group_id,
             mode,
             query_mode,
             query_chars,
             tail_count,
             topic_hint_count,
+            len(head_contexts),
+            unit_count,
             len(contexts),
             self.topic_slice_retrieval_recent_days,
             self.topic_slice_retrieval_limit,
+            self.semantic_unit_retrieval_per_head,
         )
         return contexts, {
             "enabled": True,
@@ -445,6 +528,8 @@ class SemanticInputBuilder:
             "tail_count": tail_count,
             "topic_hint_count": topic_hint_count,
             "query_mode": query_mode,
+            "head_count": len(head_contexts),
+            "unit_count": unit_count,
         }
 
     def _build_retrieval_query_payload(
@@ -582,10 +667,10 @@ class SemanticInputBuilder:
             return normalized
         return f"{normalized[:max_chars]}..."
 
-    def _format_retrieved_slice_context(self, payload: dict[str, Any]) -> str:
+    def _format_retrieved_head_context(self, payload: dict[str, Any]) -> str:
         if not isinstance(payload, dict):
             return ""
-        if str(payload.get("object_type", "")).strip() not in {"", "topic_slice"}:
+        if str(payload.get("object_type", "")).strip() not in {"", "topic_head", "topic_slice"}:
             return ""
         topic_id = str(payload.get("topic_id", "")).strip()
         if not topic_id:
@@ -600,15 +685,42 @@ class SemanticInputBuilder:
             rows = [str(item).strip() for item in participants if str(item).strip()]
             if rows:
                 participant_text = "、".join(rows[:5])
-        core_text = str(payload.get("core_text", "")).strip() or "无"
-        if len(core_text) > 120:
-            core_text = f"{core_text[:120]}..."
+        head_text = str(payload.get("head_text", "")).strip() or str(payload.get("core_text", "")).strip() or "无"
+        if len(head_text) > 120:
+            head_text = f"{head_text[:120]}..."
         start_text = datetime.fromtimestamp(start_ts).strftime("%H:%M") if start_ts > 0 else "--:--"
         end_text = datetime.fromtimestamp(end_ts).strftime("%H:%M") if end_ts > 0 else "--:--"
         return (
-            f"retrieved_topic_id={topic_id}; date={date_label}; time={start_text}-{end_text}; "
-            f"message_count={message_count}; participants={participant_text}; core_text={core_text}"
+            f"retrieved_topic_id={topic_id}; retrieved_topic_head_id={topic_id}; date={date_label}; time={start_text}-{end_text}; "
+            f"message_count={message_count}; participants={participant_text}; head_text={head_text}"
         )
+
+    def _format_retrieved_unit_context(self, payload: dict[str, Any]) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        if str(payload.get("object_type", "")).strip() not in {"", "semantic_unit"}:
+            return ""
+        topic_id = str(payload.get("topic_id", "")).strip()
+        unit_id = str(payload.get("semantic_unit_id", "")).strip() or str(payload.get("unit_id", "")).strip()
+        if not topic_id or not unit_id:
+            return ""
+        unit_text = str(payload.get("text", "")).strip() or str(payload.get("unit_text", "")).strip()
+        if not unit_text:
+            return ""
+        if len(unit_text) > 120:
+            unit_text = f"{unit_text[:120]}..."
+        start_ts = self._safe_int(payload.get("start_ts", 0))
+        end_ts = self._safe_int(payload.get("end_ts", 0))
+        start_text = datetime.fromtimestamp(start_ts).strftime("%H:%M") if start_ts > 0 else "--:--"
+        end_text = datetime.fromtimestamp(end_ts).strftime("%H:%M") if end_ts > 0 else "--:--"
+        return (
+            f"retrieved_semantic_unit_id={unit_id}; topic_id={topic_id}; "
+            f"time={start_text}-{end_text}; unit_text={unit_text}"
+        )
+
+    def _format_retrieved_slice_context(self, payload: dict[str, Any]) -> str:
+        """兼容旧调用，已迁移到 topic head 语义。"""
+        return self._format_retrieved_head_context(payload)
 
     def _merge_slice_contexts(
         self,
@@ -997,7 +1109,7 @@ class SemanticInputBuilder:
         material: SemanticInputMaterial,
     ) -> None:
         logger.info(
-            "[group_digest.semantic_input] group_id=%s date=%s mode=%s source=%s total_effective=%d tail_selected=%d tail_truncated=%s retrieved_slice_count=%d current_day_slice_count=%d topic_slice_total=%d topic_slice_selected=%d topic_slice_total_chars=%d topic_slice_selected_chars=%d topic_slice_truncated=%s retrieval_enabled=%s retrieval_degraded=%s retrieval_query_chars=%d retrieval_query_tail_count=%d retrieval_query_topic_hint_count=%d retrieval_query_mode=%s slang_context_count=%d slang_context_chars=%d slang_candidate_count=%d slang_inferred_count=%d slang_reused_count=%d slang_degraded=%s topic_slice_hit=%s",
+            "[group_digest.semantic_input] group_id=%s date=%s mode=%s source=%s total_effective=%d tail_selected=%d tail_truncated=%s retrieved_head_count=%d retrieved_unit_count=%d current_day_head_count=%d topic_slice_total=%d topic_slice_selected=%d topic_slice_total_chars=%d topic_slice_selected_chars=%d topic_slice_truncated=%s retrieval_enabled=%s retrieval_degraded=%s retrieval_query_chars=%d retrieval_query_tail_count=%d retrieval_query_topic_hint_count=%d retrieval_query_mode=%s slang_context_count=%d slang_context_chars=%d slang_candidate_count=%d slang_inferred_count=%d slang_reused_count=%d slang_degraded=%s topic_slice_hit=%s",
             group_id,
             date_label,
             mode,
@@ -1005,8 +1117,9 @@ class SemanticInputBuilder:
             material.total_effective_messages,
             material.selected_message_count,
             "true" if material.truncated else "false",
-            material.retrieved_topic_slice_count,
-            material.current_day_topic_slice_count,
+            material.retrieved_topic_head_count,
+            material.retrieved_semantic_unit_count,
+            material.current_day_topic_head_count,
             material.topic_slice_total_count,
             material.topic_slice_selected_count,
             material.topic_slice_total_chars,
@@ -1030,8 +1143,8 @@ class SemanticInputBuilder:
     def describe_extension_point(self) -> dict[str, Any]:
         """用于文档与调试的扩展点说明。"""
         return {
-            "current_source": "retrieved_topic_slices_plus_current_day_slices_plus_tail_raw_messages_plus_slang_contexts",
-            "future_source": "retrieved_topic_slices_plus_current_day_slices_plus_tail_raw_messages_plus_slang_contexts",
+            "current_source": "retrieved_topic_heads_units_plus_current_day_heads_plus_tail_raw_messages_plus_slang_contexts",
+            "future_source": "retrieved_topic_heads_units_plus_current_day_heads_plus_tail_raw_messages_plus_slang_contexts",
             "future_manager": "GroupTopicSegmentManager",
             "topic_slice_contexts_enabled": self.enable_topic_slice_contexts,
             "topic_slice_context_char_guard": self.max_topic_slice_context_chars,

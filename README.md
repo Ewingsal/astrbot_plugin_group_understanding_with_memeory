@@ -30,17 +30,17 @@
 
 1. **消息事实层**：按群按天 JSONL 归档，append-only。
 2. **topic 生命周期层**：有效消息驱动，支持 `created/active/closed`。
-3. **topic slice 层**：topic close 后落盘，形成可复用中间表示。
-4. **语义输入组装层**：`retrieved slices + current-day slices + tail raw messages + optional slang contexts`。
+3. **topic head + semantic unit 层**：topic close 后落盘 `topic head`，并复用 `semantic unit` 做细粒度检索。
+4. **语义输入组装层**：`retrieved topic heads + in-head semantic units + current-day heads + tail raw messages + optional slang contexts`。
 5. **黑话学习层（轻量版）**：统计预筛 -> retrieval 取证 -> 条件 LLM 解释 -> 解释复用注入。
 6. **缓存/增量层**：checkpoint + delta 增量更新 + 回退全量重算。
 
 ### 3. 长期记忆能力（当前已落地）
 
 1. 原始消息长期归档：`messages/<group_id>/<YYYY-MM-DD>.jsonl`。
-2. 话题切片长期归档：`topic_slices/<group_id>/<YYYY-MM-DD>.jsonl`。
+2. 话题头长期归档：`topic_slices/<group_id>/<YYYY-MM-DD>.jsonl`（路径沿用，内容已升级为 topic heads）。
 3. 黑话解释长期归档：`slang/<group_id>/slang.jsonl`。
-4. 向量记忆（可选）：semantic_unit 与 topic_slice/core embedding 持久化到 Qdrant。
+4. 向量记忆（可选）：semantic_unit 与 topic_head embedding 持久化到 Qdrant。
 
 ## 架构主线
 
@@ -48,8 +48,8 @@
 
 1. 消息采集与过滤
 2. 事实归档（JSONL）
-3. topic 生命周期推进与切片沉淀
-4. 语义输入组装（slice-aware / retrieval-aware / slang-aware）
+3. topic 生命周期推进与 topic head 沉淀
+4. 语义输入组装（head-aware / retrieval-aware / slang-aware）
 5. LLM 语义分析
 6. 缓存命中 / 增量更新 / 全量重算
 7. 命令返回或 scheduler 主动发送
@@ -59,7 +59,7 @@
 - `main.py`：插件入口与依赖注入
 - `services/storage.py`：消息事实存储
 - `services/group_topic_segment_manager.py`：topic 生命周期
-- `services/topic_slice_store.py`：slice 持久化
+- `services/topic_slice_store.py`：topic head 持久化（兼容旧 slice 命名）
 - `services/semantic_input_builder.py`：语义输入唯一主入口
 - `services/digest_service.py`：日报编排核心
 - `services/llm_analysis_service.py`：LLM 调用与结构化解析
@@ -83,7 +83,7 @@
 1. 有效消息以序列方式推进。
 2. 每两条有效消息构造一个 semantic unit。
 3. topic core 创建后保持稳定，不做滚动漂移更新。
-4. 长时间无有效消息后 close，并落盘为 slice。
+4. 长时间无有效消息后 close，并落盘为 topic head。
 
 ### 3. transfer buffer
 
@@ -103,8 +103,9 @@
 
 当前 full-window / incremental 都通过它组装材料：
 
-1. historical retrieved slices（Qdrant retrieval，可降级）
-2. current-day closed slices
+1. historical retrieved topic heads（Qdrant retrieval，可降级）
+2. in-head semantic units（二层检索）
+3. current-day closed topic heads
 3. tail raw effective messages
 4. related slang contexts（可配置）
 
@@ -119,7 +120,7 @@
 这版黑话学习借鉴参考项目思路，但做了轻量适配：
 
 1. **候选发现（低成本）**：`SlangCandidateMiner` 在 slices 上做统计预筛。
-2. **历史取证（RAG）**：优先检索当前群近期 `topic_slice` 语境。
+2. **历史取证（RAG）**：优先检索当前群近期 `topic_head`，再补充 `in-head semantic units`。
 3. **条件解释（LLM）**：证据不足不解释，避免硬猜。
 4. **解释复用（store）**：`SlangStore` 按群落盘并复用，减少重复推断。
 5. **主链路注入**：由 `SemanticInputBuilder` 按相关性注入解释上下文。
@@ -149,7 +150,7 @@
 默认在 AstrBot `data` 目录下：
 
 - 消息事实层：`messages/<group_id>/<YYYY-MM-DD>.jsonl`
-- topic slices：`topic_slices/<group_id>/<YYYY-MM-DD>.jsonl`
+- topic heads：`topic_slices/<group_id>/<YYYY-MM-DD>.jsonl`
 - slang 解释：`slang/<group_id>/slang.jsonl`
 - 群 origin 映射：`group_origins.json`
 - 报告缓存：`report_cache.json`
@@ -183,7 +184,7 @@
 - `embedding_api_key` / `embedding_model` / `embedding_base_url` / `embedding_timeout_seconds`
 - `enable_qdrant_embedding_store`
 - `qdrant_url` / `qdrant_api_key`
-- `qdrant_semantic_unit_collection` / `qdrant_topic_slice_collection`
+- `qdrant_semantic_unit_collection` / `qdrant_topic_head_collection`（兼容旧 `qdrant_topic_slice_collection`）
 - `qdrant_vector_size` / `qdrant_distance_metric` / `qdrant_timeout_seconds`
 
 ### D. retrieval 语义增强

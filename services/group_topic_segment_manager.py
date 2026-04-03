@@ -14,7 +14,7 @@ from .embedding.noop_backend import NoopEmbeddingBackend
 from .embedding_store.base import (
     EmbeddingStore,
     SemanticUnitEmbeddingDocument,
-    TopicSliceEmbeddingDocument,
+    TopicHeadEmbeddingDocument,
 )
 from .embedding_store.noop_store import NoopEmbeddingStore
 from .models import (
@@ -22,7 +22,7 @@ from .models import (
     MessageRecord,
     RuntimeTopic,
     SemanticUnitRecord,
-    TopicSliceRecord,
+    TopicHeadRecord,
 )
 from .topic_message_filter import classify_topic_message
 from .topic_slice_store import TopicSliceStore
@@ -107,7 +107,7 @@ class GroupTopicSegmentManager:
         self.closed_topic_prune_seconds = max(60, int(closed_topic_prune_seconds))
 
         self._state_by_group_day: dict[tuple[str, str], GroupDayTopicRuntimeState] = {}
-        self._pending_topic_slice_embedding_docs: list[TopicSliceEmbeddingDocument] = []
+        self._pending_topic_head_embedding_docs: list[TopicHeadEmbeddingDocument] = []
         self._lock = threading.RLock()
 
     async def ingest_message(self, record: MessageRecord) -> None:
@@ -167,7 +167,7 @@ class GroupTopicSegmentManager:
                 semantic_pair = (first, second)
 
         if semantic_pair is None:
-            await self._flush_pending_topic_slice_embedding_docs()
+            await self._flush_pending_topic_head_embedding_docs()
             return
 
         unit = await self.build_semantic_unit_from_messages(*semantic_pair)
@@ -176,7 +176,7 @@ class GroupTopicSegmentManager:
             date_label=date_label,
             unit=unit,
         )
-        await self._flush_pending_topic_slice_embedding_docs()
+        await self._flush_pending_topic_head_embedding_docs()
 
     async def build_semantic_unit_from_messages(
         self,
@@ -291,7 +291,7 @@ class GroupTopicSegmentManager:
                 closed_transitions += close_delta["closed"]
                 persisted_slices += close_delta["persisted_slices"]
 
-        await self._flush_pending_topic_slice_embedding_docs()
+        await self._flush_pending_topic_head_embedding_docs()
 
         summary = SweepSummary(
             scanned_states=scanned_states,
@@ -341,20 +341,21 @@ class GroupTopicSegmentManager:
     ) -> list[str]:
         _ = (time_window, mode)
         safe_limit = max(1, int(limit)) if limit is not None else None
-        slices = self.topic_slice_store.load_slices(
+        heads = self.topic_slice_store.load_heads(
             group_id=group_id,
             date_label=date_label,
             limit=safe_limit,
         )
-        if not slices:
+        if not heads:
             return []
 
         contexts: list[str] = []
-        for row in slices:
+        for row in heads:
             start_text = datetime.fromtimestamp(row.start_ts).strftime("%H:%M")
             end_text = datetime.fromtimestamp(row.end_ts).strftime("%H:%M")
             participants = "、".join(row.participants[:5]) if row.participants else "无"
-            core_text = row.core_text or "无"
+            head_text = row.head_text or "无"
+            core_text = head_text
             if len(core_text) > 120:
                 core_text = f"{core_text[:120]}..."
             contexts.append(
@@ -446,9 +447,6 @@ class GroupTopicSegmentManager:
                         self.transfer_similarity_threshold,
                     )
                     if len(state.transfer_buffer.units) < self.transfer_buffer_size:
-                        doc = self._build_semantic_unit_embedding_doc(unit=unit, topic_id="")
-                        if doc is not None:
-                            semantic_unit_docs.append(doc)
                         immediate_return = True
                     else:
                         transfer_units = list(state.transfer_buffer.units)
@@ -477,7 +475,11 @@ class GroupTopicSegmentManager:
                             date_label,
                             current_topic.topic_id,
                         )
-                    self._append_semantic_unit_to_topic_unlocked(topic=current_topic, unit=unit)
+                    self._append_semantic_unit_to_topic_unlocked(
+                        state=state,
+                        topic=current_topic,
+                        unit=unit,
+                    )
                     unit.topic_id = current_topic.topic_id
                     doc = self._build_semantic_unit_embedding_doc(
                         unit=unit,
@@ -590,7 +592,11 @@ class GroupTopicSegmentManager:
             core_embedding_version=self.embedding_version if core_embedding else "",
         )
         for unit in units:
-            self._append_semantic_unit_to_topic_unlocked(topic=topic, unit=unit)
+            self._append_semantic_unit_to_topic_unlocked(
+                state=state,
+                topic=topic,
+                unit=unit,
+            )
         topic.status = TOPIC_STATUS_ACTIVE
         state.topics[topic.topic_id] = topic
         state.current_topic_id = topic.topic_id
@@ -646,8 +652,15 @@ class GroupTopicSegmentManager:
         )
         return topic
 
-    def _append_semantic_unit_to_topic_unlocked(self, *, topic: RuntimeTopic, unit: SemanticUnitRecord) -> None:
+    def _append_semantic_unit_to_topic_unlocked(
+        self,
+        *,
+        state: GroupDayTopicRuntimeState,
+        topic: RuntimeTopic,
+        unit: SemanticUnitRecord,
+    ) -> None:
         unit.topic_id = topic.topic_id
+        state.semantic_units[unit.unit_id] = unit
         topic.last_active_at = max(int(topic.last_active_at), int(unit.end_ts))
         topic.semantic_unit_ids = self._append_unique(topic.semantic_unit_ids, unit.unit_id)
         topic.participants = self._dedupe_strings(topic.participants + list(unit.participants))
@@ -700,7 +713,7 @@ class GroupTopicSegmentManager:
         if state.current_topic_id == topic.topic_id:
             state.current_topic_id = ""
 
-        persisted = 1 if self._persist_closed_topic_unlocked(topic=topic) else 0
+        persisted = 1 if self._persist_closed_topic_unlocked(state=state, topic=topic) else 0
         logger.info(
             "[group_digest.topic_segment] topic_closed group_id=%s date=%s topic_id=%s reason=%s message_count=%d",
             topic.group_id,
@@ -711,43 +724,55 @@ class GroupTopicSegmentManager:
         )
         return {"closed": 1, "persisted_slices": persisted}
 
-    def _persist_closed_topic_unlocked(self, *, topic: RuntimeTopic) -> bool:
+    def _persist_closed_topic_unlocked(
+        self,
+        *,
+        state: GroupDayTopicRuntimeState,
+        topic: RuntimeTopic,
+    ) -> bool:
         if topic.slice_persisted:
             return False
         if topic.message_count <= 0:
             topic.slice_persisted = True
             return False
 
-        row = TopicSliceRecord(
+        topic_units = self._collect_topic_units_unlocked(state=state, topic=topic)
+        head_embedding = self._build_head_embedding(topic_units)
+        if not head_embedding and topic.core_embedding:
+            head_embedding = list(topic.core_embedding)
+        head_text = self._build_head_text(topic_units=topic_units, fallback_text=topic.core_text)
+        row = TopicHeadRecord(
             group_id=topic.group_id,
             date_label=topic.date_label,
             topic_id=topic.topic_id,
             start_ts=topic.created_at,
             end_ts=topic.last_active_at,
             message_count=topic.message_count,
+            effective_message_count=topic.effective_message_count,
             participants=list(topic.participants),
             recent_keywords=[],
+            message_ids=list(topic.message_ids),
+            semantic_unit_ids=list(topic.semantic_unit_ids),
             first_message_id=topic.first_message_id,
             last_message_id=topic.last_message_id,
-            core_text=topic.core_text,
-            core_message_ids=list(topic.core_message_ids),
-            message_ids=list(topic.message_ids),
-            effective_message_count=topic.effective_message_count,
+            head_text=head_text,
+            head_embedding=list(head_embedding),
             semantic_unit_count=len(topic.semantic_unit_ids),
-            core_embedding_model=topic.core_embedding_model,
-            core_embedding_version=topic.core_embedding_version,
+            head_embedding_model=self.embedding_model if head_embedding else "",
+            head_embedding_version=self.embedding_version if head_embedding else "",
         )
-        self.topic_slice_store.append_slice(row)
-        topic_slice_doc = self._build_topic_slice_embedding_doc(topic=topic, row=row)
-        if topic_slice_doc is not None:
-            self._pending_topic_slice_embedding_docs.append(topic_slice_doc)
+        self.topic_slice_store.append_head(row)
+        topic_head_doc = self._build_topic_head_embedding_doc(row=row)
+        if topic_head_doc is not None:
+            self._pending_topic_head_embedding_docs.append(topic_head_doc)
         topic.slice_persisted = True
         logger.info(
-            "[group_digest.topic_segment] slice_persisted group_id=%s date=%s topic_id=%s message_count=%d",
+            "[group_digest.topic_segment] topic_head_persisted group_id=%s date=%s topic_id=%s message_count=%d semantic_unit_count=%d",
             topic.group_id,
             topic.date_label,
             topic.topic_id,
             topic.message_count,
+            len(topic.semantic_unit_ids),
         )
         return True
 
@@ -765,7 +790,10 @@ class GroupTopicSegmentManager:
             to_remove.append(topic_id)
 
         for topic_id in to_remove:
-            state.topics.pop(topic_id, None)
+            topic = state.topics.pop(topic_id, None)
+            if topic is not None:
+                for unit_id in topic.semantic_unit_ids:
+                    state.semantic_units.pop(unit_id, None)
             logger.info(
                 "[group_digest.topic_segment] topic_pruned group_id=%s date=%s topic_id=%s",
                 state.group_id,
@@ -792,6 +820,67 @@ class GroupTopicSegmentManager:
             result.append(key)
         return result
 
+    def _collect_topic_units_unlocked(
+        self,
+        *,
+        state: GroupDayTopicRuntimeState,
+        topic: RuntimeTopic,
+    ) -> list[SemanticUnitRecord]:
+        rows: list[SemanticUnitRecord] = []
+        for unit_id in topic.semantic_unit_ids:
+            unit = state.semantic_units.get(unit_id)
+            if unit is None:
+                continue
+            rows.append(unit)
+        rows.sort(key=lambda item: (int(item.start_ts), str(item.unit_id)))
+        return rows
+
+    def _build_head_text(
+        self,
+        *,
+        topic_units: list[SemanticUnitRecord],
+        fallback_text: str,
+    ) -> str:
+        if not topic_units:
+            return str(fallback_text or "").strip()
+        rows: list[str] = []
+        for unit in topic_units[:4]:
+            text = str(unit.text or "").strip()
+            if not text:
+                continue
+            rows.append(text)
+        joined = "\n\n".join(rows).strip()
+        if joined:
+            return joined
+        return str(fallback_text or "").strip()
+
+    def _build_head_embedding(self, topic_units: list[SemanticUnitRecord]) -> list[float]:
+        vectors = [list(unit.embedding) for unit in topic_units if unit.embedding]
+        if not vectors:
+            return []
+        dim = len(vectors[0])
+        if dim <= 0:
+            return []
+        filtered: list[list[float]] = [vec for vec in vectors if len(vec) == dim]
+        if not filtered:
+            return []
+
+        total = [0.0] * dim
+        for vec in filtered:
+            for idx, value in enumerate(vec):
+                total[idx] += float(value)
+        count = float(len(filtered))
+        mean_vector = [value / count for value in total]
+        return self._normalize_vector(mean_vector)
+
+    def _normalize_vector(self, values: list[float]) -> list[float]:
+        if not values:
+            return []
+        norm = math.sqrt(sum(float(item) * float(item) for item in values))
+        if norm <= 0:
+            return []
+        return [float(item) / norm for item in values]
+
     async def _upsert_semantic_unit_docs(
         self,
         docs: list[SemanticUnitEmbeddingDocument],
@@ -810,25 +899,29 @@ class GroupTopicSegmentManager:
                     exc,
                 )
 
-    async def _flush_pending_topic_slice_embedding_docs(self) -> None:
+    async def _flush_pending_topic_head_embedding_docs(self) -> None:
         if not self.embedding_store.enabled:
             with self._lock:
-                if self._pending_topic_slice_embedding_docs:
-                    self._pending_topic_slice_embedding_docs.clear()
+                if self._pending_topic_head_embedding_docs:
+                    self._pending_topic_head_embedding_docs.clear()
             return
 
         with self._lock:
-            docs = list(self._pending_topic_slice_embedding_docs)
-            self._pending_topic_slice_embedding_docs.clear()
+            docs = list(self._pending_topic_head_embedding_docs)
+            self._pending_topic_head_embedding_docs.clear()
         if not docs:
             return
 
         for doc in docs:
             try:
-                await self.embedding_store.upsert_topic_slice(doc)
+                upsert_topic_head = getattr(self.embedding_store, "upsert_topic_head", None)
+                if callable(upsert_topic_head):
+                    await upsert_topic_head(doc)
+                else:
+                    await self.embedding_store.upsert_topic_slice(doc)
             except Exception as exc:
                 logger.warning(
-                    "[group_digest.embedding_store] topic_slice_upsert_failed point_id=%s error=%s",
+                    "[group_digest.embedding_store] topic_head_upsert_failed point_id=%s error=%s",
                     doc.point_id,
                     exc,
                 )
@@ -852,6 +945,7 @@ class GroupTopicSegmentManager:
             "end_ts": int(unit.end_ts),
             "message_ids": list(unit.message_ids),
             "text": unit.text,
+            "unit_text": unit.text,
             "embedding_model": unit.embedding_model or self.embedding_model,
             "embedding_version": unit.embedding_version or self.embedding_version,
         }
@@ -862,16 +956,15 @@ class GroupTopicSegmentManager:
             payload=payload,
         )
 
-    def _build_topic_slice_embedding_doc(
+    def _build_topic_head_embedding_doc(
         self,
         *,
-        topic: RuntimeTopic,
-        row: TopicSliceRecord,
-    ) -> TopicSliceEmbeddingDocument | None:
-        if not topic.core_embedding:
+        row: TopicHeadRecord,
+    ) -> TopicHeadEmbeddingDocument | None:
+        if not row.head_embedding:
             return None
         payload = {
-            "object_type": "topic_slice",
+            "object_type": "topic_head",
             "group_id": row.group_id,
             "date_label": row.date_label,
             "topic_id": row.topic_id,
@@ -880,20 +973,23 @@ class GroupTopicSegmentManager:
             "first_message_id": row.first_message_id,
             "last_message_id": row.last_message_id,
             "message_count": int(row.message_count),
+            "effective_message_count": int(row.effective_message_count),
             "participants": list(row.participants),
             "recent_keywords": list(row.recent_keywords),
-            "core_text": row.core_text,
-            "embedding_model": row.core_embedding_model or self.embedding_model,
-            "embedding_version": row.core_embedding_version or self.embedding_version,
+            "head_text": row.head_text,
+            "message_ids": list(row.message_ids),
+            "semantic_unit_ids": list(row.semantic_unit_ids),
+            "embedding_model": row.head_embedding_model or self.embedding_model,
+            "embedding_version": row.head_embedding_version or self.embedding_version,
         }
-        point_id = self._topic_slice_point_id(
+        point_id = self._topic_head_point_id(
             group_id=row.group_id,
             date_label=row.date_label,
             topic_id=row.topic_id,
         )
-        return TopicSliceEmbeddingDocument(
+        return TopicHeadEmbeddingDocument(
             point_id=point_id,
-            vector=list(topic.core_embedding),
+            vector=list(row.head_embedding),
             payload=payload,
         )
 
@@ -906,8 +1002,8 @@ class GroupTopicSegmentManager:
         digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
         return f"su_{digest}"
 
-    def _topic_slice_point_id(self, *, group_id: str, date_label: str, topic_id: str) -> str:
-        seed = f"topic_slice|{group_id}|{date_label}|{topic_id}"
+    def _topic_head_point_id(self, *, group_id: str, date_label: str, topic_id: str) -> str:
+        seed = f"topic_head|{group_id}|{date_label}|{topic_id}"
         digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
         return f"ts_{digest}"
 

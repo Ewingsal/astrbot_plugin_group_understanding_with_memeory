@@ -8,18 +8,18 @@ from pathlib import Path
 
 from astrbot.api import logger
 
-from .models import TopicSliceRecord
+from .models import TopicHeadRecord, TopicSliceRecord
 
 
 class TopicSliceStore:
-    """按群/按天的 topic slice 轻量存储（append-only JSONL）。"""
+    """按群/按天的 topic head 轻量存储（append-only JSONL）。"""
 
     def __init__(self, root_dir: Path):
         self.root_dir = root_dir
         self._file_lock = threading.RLock()
         self.root_dir.mkdir(parents=True, exist_ok=True)
 
-    def append_slice(self, record: TopicSliceRecord) -> None:
+    def append_head(self, record: TopicHeadRecord) -> None:
         file_path = self._resolve_daily_file_path(
             group_id=record.group_id,
             date_label=record.date_label,
@@ -34,7 +34,11 @@ class TopicSliceStore:
                 fp.flush()
                 os.fsync(fp.fileno())
 
-    def load_slices(
+    def append_slice(self, record: TopicSliceRecord) -> None:
+        """兼容旧调用：append_slice 与 append_head 等价。"""
+        self.append_head(record)
+
+    def load_heads(
         self,
         *,
         group_id: str,
@@ -42,10 +46,10 @@ class TopicSliceStore:
         start_ts: int | None = None,
         end_ts: int | None = None,
         limit: int | None = None,
-    ) -> list[TopicSliceRecord]:
+    ) -> list[TopicHeadRecord]:
         with self._file_lock:
             rows = list(
-                self._iter_slice_records(
+                self._iter_head_records(
                     group_id=group_id,
                     date_label=date_label,
                     start_ts=start_ts,
@@ -57,7 +61,31 @@ class TopicSliceStore:
                 return rows[-limit:]
             return rows
 
-    def _iter_slice_records(
+    def load_slices(
+        self,
+        *,
+        group_id: str,
+        date_label: str | None = None,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        limit: int | None = None,
+    ) -> list[TopicSliceRecord]:
+        """兼容旧调用：load_slices 与 load_heads 等价。"""
+        heads = self.load_heads(
+            group_id=group_id,
+            date_label=date_label,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            limit=limit,
+        )
+        rows: list[TopicSliceRecord] = []
+        for head in heads:
+            item = TopicSliceRecord.from_dict(head.to_dict())
+            if item is not None:
+                rows.append(item)
+        return rows
+
+    def _iter_head_records(
         self,
         *,
         group_id: str,
@@ -71,7 +99,7 @@ class TopicSliceStore:
             start_ts=start_ts,
             end_ts=end_ts,
         ):
-            yield from self._iter_slice_records_from_file(
+            yield from self._iter_head_records_from_file(
                 file_path=file_path,
                 group_id=group_id,
                 start_ts=start_ts,
@@ -108,7 +136,7 @@ class TopicSliceStore:
             if file_path.is_file():
                 yield file_path
 
-    def _iter_slice_records_from_file(
+    def _iter_head_records_from_file(
         self,
         *,
         file_path: Path,
@@ -133,7 +161,7 @@ class TopicSliceStore:
                         )
                         continue
 
-                    row = TopicSliceRecord.from_dict(payload)
+                    row = TopicHeadRecord.from_dict(payload)
                     if row is None:
                         continue
                     if row.group_id != group_id:

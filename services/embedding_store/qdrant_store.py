@@ -9,7 +9,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from .base import EmbeddingStore, SemanticUnitEmbeddingDocument, TopicSliceEmbeddingDocument
+from .base import EmbeddingStore, SemanticUnitEmbeddingDocument, TopicHeadEmbeddingDocument
 
 
 DEFAULT_QDRANT_TIMEOUT_SECONDS = 5
@@ -26,7 +26,8 @@ class QdrantEmbeddingStore(EmbeddingStore):
         qdrant_url: str = "",
         qdrant_api_key: str = "",
         semantic_unit_collection: str = "group_digest_semantic_units",
-        topic_slice_collection: str = "group_digest_topic_slices",
+        topic_head_collection: str = "group_digest_topic_heads",
+        topic_slice_collection: str = "",
         vector_size: int = 1536,
         distance_metric: str = "cosine",
         prefer_grpc: bool = False,
@@ -36,7 +37,10 @@ class QdrantEmbeddingStore(EmbeddingStore):
         self.qdrant_url = str(qdrant_url or "").strip().rstrip("/")
         self.qdrant_api_key = str(qdrant_api_key or "").strip()
         self.semantic_unit_collection = str(semantic_unit_collection or "").strip() or "group_digest_semantic_units"
-        self.topic_slice_collection = str(topic_slice_collection or "").strip() or "group_digest_topic_slices"
+        resolved_topic_head_collection = str(topic_head_collection or "").strip()
+        if not resolved_topic_head_collection:
+            resolved_topic_head_collection = str(topic_slice_collection or "").strip()
+        self.topic_head_collection = resolved_topic_head_collection or "group_digest_topic_heads"
         self.vector_size = max(1, int(vector_size))
         self.distance_metric = self._normalize_distance_metric(distance_metric)
         self.prefer_grpc = bool(prefer_grpc)
@@ -72,13 +76,13 @@ class QdrantEmbeddingStore(EmbeddingStore):
             payload=doc.payload,
         )
 
-    async def upsert_topic_slice(self, doc: TopicSliceEmbeddingDocument) -> bool:
+    async def upsert_topic_head(self, doc: TopicHeadEmbeddingDocument) -> bool:
         if not doc.vector:
             return False
         if not await self._ensure_ready():
             return False
         return await self._upsert_point(
-            collection=self.topic_slice_collection,
+            collection=self.topic_head_collection,
             point_id=doc.point_id,
             vector=doc.vector,
             payload=doc.payload,
@@ -90,17 +94,76 @@ class QdrantEmbeddingStore(EmbeddingStore):
         group_id: str,
         date_label: str | None = None,
         topic_id: str | None = None,
+        query_vector: list[float] | None = None,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        recent_days: int | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         if not await self._ensure_ready():
             return []
-        return await self._scroll_points(
+        if query_vector:
+            return await self._search_semantic_unit_points(
+                collection=self.semantic_unit_collection,
+                group_id=group_id,
+                date_label=date_label,
+                topic_id=topic_id,
+                query_vector=query_vector,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                recent_days=recent_days,
+                limit=limit,
+            )
+        return await self._scroll_semantic_unit_points(
             collection=self.semantic_unit_collection,
             group_id=group_id,
             date_label=date_label,
             topic_id=topic_id,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            recent_days=recent_days,
             limit=limit,
         )
+
+    async def query_topic_heads(
+        self,
+        *,
+        group_id: str,
+        date_label: str | None = None,
+        topic_id: str | None = None,
+        query_vector: list[float] | None = None,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        recent_days: int | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        if not await self._ensure_ready():
+            return []
+        if query_vector:
+            return await self._search_topic_head_points(
+                collection=self.topic_head_collection,
+                group_id=group_id,
+                date_label=date_label,
+                topic_id=topic_id,
+                query_vector=query_vector,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                recent_days=recent_days,
+                limit=limit,
+            )
+        return await self._scroll_topic_head_points(
+            collection=self.topic_head_collection,
+            group_id=group_id,
+            date_label=date_label,
+            topic_id=topic_id,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            recent_days=recent_days,
+            limit=limit,
+        )
+
+    async def upsert_topic_slice(self, doc: TopicHeadEmbeddingDocument) -> bool:
+        return await self.upsert_topic_head(doc)
 
     async def query_topic_slices(
         self,
@@ -117,8 +180,8 @@ class QdrantEmbeddingStore(EmbeddingStore):
         if not await self._ensure_ready():
             return []
         if query_vector:
-            return await self._search_topic_slice_points(
-                collection=self.topic_slice_collection,
+            return await self._search_topic_head_points(
+                collection=self.topic_head_collection,
                 group_id=group_id,
                 date_label=date_label,
                 topic_id=topic_id,
@@ -127,9 +190,10 @@ class QdrantEmbeddingStore(EmbeddingStore):
                 end_ts=end_ts,
                 recent_days=recent_days,
                 limit=limit,
+                object_type="topic_slice",
             )
-        return await self._scroll_topic_slice_points(
-            collection=self.topic_slice_collection,
+        return await self._scroll_topic_head_points(
+            collection=self.topic_head_collection,
             group_id=group_id,
             date_label=date_label,
             topic_id=topic_id,
@@ -137,6 +201,7 @@ class QdrantEmbeddingStore(EmbeddingStore):
             end_ts=end_ts,
             recent_days=recent_days,
             limit=limit,
+            object_type="topic_slice",
         )
 
     async def _ensure_ready(self) -> bool:
@@ -153,7 +218,7 @@ class QdrantEmbeddingStore(EmbeddingStore):
 
             try:
                 await self._ensure_collection(self.semantic_unit_collection)
-                await self._ensure_collection(self.topic_slice_collection)
+                await self._ensure_collection(self.topic_head_collection)
             except Exception as exc:
                 self._enabled = False
                 self._disabled_reason = f"qdrant_init_failed:{exc}"
@@ -166,10 +231,10 @@ class QdrantEmbeddingStore(EmbeddingStore):
 
             self._ready = True
             logger.info(
-                "[group_digest.embedding_store] qdrant_ready url=%s semantic_collection=%s topic_collection=%s vector_size=%d distance=%s prefer_grpc=%s",
+                "[group_digest.embedding_store] qdrant_ready url=%s semantic_collection=%s topic_head_collection=%s vector_size=%d distance=%s prefer_grpc=%s",
                 self.qdrant_url,
                 self.semantic_unit_collection,
-                self.topic_slice_collection,
+                self.topic_head_collection,
                 self.vector_size,
                 self.distance_metric,
                 "true" if self.prefer_grpc else "false",
@@ -237,76 +302,7 @@ class QdrantEmbeddingStore(EmbeddingStore):
             )
             return False
 
-    async def _scroll_points(
-        self,
-        *,
-        collection: str,
-        group_id: str,
-        date_label: str | None,
-        topic_id: str | None,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        filters: list[dict[str, Any]] = [
-            {
-                "key": "group_id",
-                "match": {"value": group_id},
-            }
-        ]
-        if date_label:
-            filters.append(
-                {
-                    "key": "date_label",
-                    "match": {"value": date_label},
-                }
-            )
-        if topic_id:
-            filters.append(
-                {
-                    "key": "topic_id",
-                    "match": {"value": topic_id},
-                }
-            )
-
-        body = {
-            "limit": max(1, int(limit)),
-            "with_payload": True,
-            "with_vector": False,
-            "filter": {"must": filters},
-        }
-        try:
-            _status, data = await self._request_json(
-                method="POST",
-                path=f"/collections/{collection}/points/scroll",
-                body=body,
-                allowed_statuses={200},
-            )
-        except Exception as exc:
-            logger.warning(
-                "[group_digest.embedding_store] qdrant_scroll_failed collection=%s error=%s",
-                collection,
-                exc,
-            )
-            return []
-
-        if not isinstance(data, dict):
-            return []
-        result = data.get("result", {})
-        if not isinstance(result, dict):
-            return []
-        points = result.get("points", [])
-        if not isinstance(points, list):
-            return []
-
-        payloads: list[dict[str, Any]] = []
-        for point in points:
-            if not isinstance(point, dict):
-                continue
-            row = point.get("payload")
-            if isinstance(row, dict):
-                payloads.append(row)
-        return payloads
-
-    async def _search_topic_slice_points(
+    async def _search_semantic_unit_points(
         self,
         *,
         collection: str,
@@ -330,7 +326,7 @@ class QdrantEmbeddingStore(EmbeddingStore):
             "with_payload": True,
             "with_vector": False,
             "filter": {
-                "must": self._build_topic_slice_must_filters(
+                "must": self._build_semantic_unit_must_filters(
                     group_id=group_id,
                     date_label=date_label,
                     topic_id=topic_id,
@@ -355,7 +351,7 @@ class QdrantEmbeddingStore(EmbeddingStore):
             return []
         return self._extract_payload_rows(data)
 
-    async def _scroll_topic_slice_points(
+    async def _scroll_semantic_unit_points(
         self,
         *,
         collection: str,
@@ -377,7 +373,7 @@ class QdrantEmbeddingStore(EmbeddingStore):
             "with_payload": True,
             "with_vector": False,
             "filter": {
-                "must": self._build_topic_slice_must_filters(
+                "must": self._build_semantic_unit_must_filters(
                     group_id=group_id,
                     date_label=date_label,
                     topic_id=topic_id,
@@ -402,7 +398,107 @@ class QdrantEmbeddingStore(EmbeddingStore):
             return []
         return self._extract_payload_rows(data)
 
-    def _build_topic_slice_must_filters(
+    async def _search_topic_head_points(
+        self,
+        *,
+        collection: str,
+        group_id: str,
+        date_label: str | None,
+        topic_id: str | None,
+        query_vector: list[float],
+        start_ts: int | None,
+        end_ts: int | None,
+        recent_days: int | None,
+        limit: int,
+        object_type: str = "topic_head",
+    ) -> list[dict[str, Any]]:
+        resolved_start_ts, resolved_end_ts = self._resolve_time_range(
+            start_ts=start_ts,
+            end_ts=end_ts,
+            recent_days=recent_days,
+        )
+        body = {
+            "vector": list(query_vector),
+            "limit": max(1, int(limit)),
+            "with_payload": True,
+            "with_vector": False,
+            "filter": {
+                "must": self._build_topic_head_must_filters(
+                    group_id=group_id,
+                    date_label=date_label,
+                    topic_id=topic_id,
+                    start_ts=resolved_start_ts,
+                    end_ts=resolved_end_ts,
+                    object_type=object_type,
+                )
+            },
+        }
+        try:
+            _status, data = await self._request_json(
+                method="POST",
+                path=f"/collections/{collection}/points/search",
+                body=body,
+                allowed_statuses={200},
+            )
+        except Exception as exc:
+            logger.warning(
+                "[group_digest.embedding_store] qdrant_search_failed collection=%s error=%s",
+                collection,
+                exc,
+            )
+            return []
+        return self._extract_payload_rows(data)
+
+    async def _scroll_topic_head_points(
+        self,
+        *,
+        collection: str,
+        group_id: str,
+        date_label: str | None,
+        topic_id: str | None,
+        start_ts: int | None,
+        end_ts: int | None,
+        recent_days: int | None,
+        limit: int,
+        object_type: str = "topic_head",
+    ) -> list[dict[str, Any]]:
+        resolved_start_ts, resolved_end_ts = self._resolve_time_range(
+            start_ts=start_ts,
+            end_ts=end_ts,
+            recent_days=recent_days,
+        )
+        body = {
+            "limit": max(1, int(limit)),
+            "with_payload": True,
+            "with_vector": False,
+            "filter": {
+                "must": self._build_topic_head_must_filters(
+                    group_id=group_id,
+                    date_label=date_label,
+                    topic_id=topic_id,
+                    start_ts=resolved_start_ts,
+                    end_ts=resolved_end_ts,
+                    object_type=object_type,
+                )
+            },
+        }
+        try:
+            _status, data = await self._request_json(
+                method="POST",
+                path=f"/collections/{collection}/points/scroll",
+                body=body,
+                allowed_statuses={200},
+            )
+        except Exception as exc:
+            logger.warning(
+                "[group_digest.embedding_store] qdrant_scroll_failed collection=%s error=%s",
+                collection,
+                exc,
+            )
+            return []
+        return self._extract_payload_rows(data)
+
+    def _build_semantic_unit_must_filters(
         self,
         *,
         group_id: str,
@@ -414,7 +510,55 @@ class QdrantEmbeddingStore(EmbeddingStore):
         must_filters: list[dict[str, Any]] = [
             {
                 "key": "object_type",
-                "match": {"value": "topic_slice"},
+                "match": {"value": "semantic_unit"},
+            },
+            {
+                "key": "group_id",
+                "match": {"value": group_id},
+            },
+        ]
+        if date_label:
+            must_filters.append(
+                {
+                    "key": "date_label",
+                    "match": {"value": date_label},
+                }
+            )
+        if topic_id:
+            must_filters.append(
+                {
+                    "key": "topic_id",
+                    "match": {"value": topic_id},
+                }
+            )
+        if start_ts is not None or end_ts is not None:
+            range_payload: dict[str, int] = {}
+            if start_ts is not None:
+                range_payload["gte"] = int(start_ts)
+            if end_ts is not None:
+                range_payload["lt"] = int(end_ts)
+            must_filters.append(
+                {
+                    "key": "end_ts",
+                    "range": range_payload,
+                }
+            )
+        return must_filters
+
+    def _build_topic_head_must_filters(
+        self,
+        *,
+        group_id: str,
+        date_label: str | None,
+        topic_id: str | None,
+        start_ts: int | None,
+        end_ts: int | None,
+        object_type: str = "topic_head",
+    ) -> list[dict[str, Any]]:
+        must_filters: list[dict[str, Any]] = [
+            {
+                "key": "object_type",
+                "match": {"value": object_type},
             },
             {
                 "key": "group_id",

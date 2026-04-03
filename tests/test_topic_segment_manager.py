@@ -31,6 +31,18 @@ class _FailingEmbeddingBackend:
         raise RuntimeError("embedding backend unavailable")
 
 
+class _AlternatingEmbeddingBackend:
+    def __init__(self):
+        self._call_index = 0
+
+    async def embed_text(self, text: str) -> list[float] | None:
+        _ = text
+        self._call_index += 1
+        if self._call_index % 2 == 1:
+            return [1.0, 0.0]
+        return [0.0, 1.0]
+
+
 class _RecordingEmbeddingStore:
     def __init__(self):
         self.semantic_docs: list[SemanticUnitEmbeddingDocument] = []
@@ -291,12 +303,39 @@ def test_topic_close_upserts_topic_slice_embedding_with_metadata(tmp_path: Path)
     assert len(embedding_store.topic_slice_docs) == 1
     doc = embedding_store.topic_slice_docs[0]
     assert doc.point_id.startswith("ts_")
-    assert doc.payload["object_type"] == "topic_slice"
+    assert doc.payload["object_type"] == "topic_head"
     assert doc.payload["group_id"] == "group_1001"
     assert doc.payload["date_label"] == "2026-03-22"
     assert doc.payload["topic_id"]
     assert doc.payload["embedding_model"] == "test-embedding-model"
     assert doc.payload["embedding_version"] == "v1"
+
+
+def test_topic_close_builds_head_embedding_from_semantic_unit_mean(tmp_path: Path) -> None:
+    manager, store = _new_manager(
+        tmp_path,
+        enable_topic_embedding=True,
+        embedding_backend=_AlternatingEmbeddingBackend(),
+        transfer_similarity_threshold=0.0,
+        topic_close_gap_seconds=120,
+    )
+    base_ts = int(datetime(2026, 3, 22, 10, 0, 0).timestamp())
+
+    _run(manager.ingest_message(_msg(content="第一段主题开场", timestamp=base_ts, message_id="m1")))
+    _run(manager.ingest_message(_msg(content="第一段主题补充", timestamp=base_ts + 10, message_id="m2")))
+    _run(manager.ingest_message(_msg(content="第二段仍属同主题", timestamp=base_ts + 20, message_id="m3")))
+    _run(manager.ingest_message(_msg(content="第二段继续补充", timestamp=base_ts + 30, message_id="m4")))
+    _run(manager.sweep_topics(now_ts=base_ts + 300, group_id="group_1001", date_label="2026-03-22"))
+
+    heads = store.load_heads(group_id="group_1001", date_label="2026-03-22")
+    assert len(heads) == 1
+    head = heads[0]
+    assert head.semantic_unit_ids
+    assert len(head.semantic_unit_ids) == 2
+    assert len(head.head_embedding) == 2
+    # mean([1,0], [0,1]) -> [0.5, 0.5], 归一化后约 [0.7071, 0.7071]
+    assert abs(head.head_embedding[0] - 0.7071) < 0.01
+    assert abs(head.head_embedding[1] - 0.7071) < 0.01
 
 
 def test_embedding_disabled_skips_embedding_store_without_crash(tmp_path: Path) -> None:
